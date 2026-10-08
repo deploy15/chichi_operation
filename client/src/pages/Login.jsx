@@ -17,7 +17,7 @@ export default function Login() {
   return (
     <div className="login-page">
       <form className="login-card" onSubmit={submit}>
-        <h1>ChiChi Operations</h1>
+        <h1>Établissement City Motors</h1>
         <p className="muted">Workforce and operations management</p>
         <Alert tone="error">{error}</Alert>
         <div className="field"><label htmlFor="email">Email</label>

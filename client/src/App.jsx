@@ -58,7 +58,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <button className="menu-btn" onClick={() => setMenuOpen((o) => !o)} aria-label="Menu" aria-expanded={menuOpen}>☰</button>
-        <div className="brand">ChiChi Operations</div>
+        <div className="brand">Établissement City Motors</div>
         <SyncBadge />
         <NavLink to="/account" className="user-chip" title="My account">{user.name}<small>{user.role}</small></NavLink>
       </header>
