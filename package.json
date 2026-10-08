@@ -1,0 +1,26 @@
+{
+  "name": "chichi-operations",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-client, multi-project, multi-site workforce and operations management system",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "migrate": "node server/migrate.js",
+    "seed:demo": "node server/seed-demo.js",
+    "build": "npm install --prefix client --include=dev && npm run build --prefix client",
+    "heroku-postbuild": "npm run build",
+    "test": "node --test server/test/*.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.7.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.12.0"
+  }
+}
