@@ -3,17 +3,21 @@ import { api, qs } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtMoney, label, opts, todayStr } from '../lib/format';
 import ResourcePage from '../components/ResourcePage';
-import { Card, EntityForm, ErrorMsg, Modal, PageHeader, Stat, Table, Tabs, useLoad, useOptions } from '../components/ui';
+import { Badge, Card, EntityForm, ErrorMsg, Modal, PageHeader, Stat, Table, Tabs, useLoad, useOptions } from '../components/ui';
 
 const CATEGORIES = ['food', 'supplier', 'transport', 'fuel', 'staff', 'energy', 'equipment', 'other'];
+
+const DOCS = ['invoice', 'purchase_order', 'delivery_note', 'receipt', 'other'];
 
 export default function Finance() {
   const [tab, setTab] = useState('expenses');
   return (
     <div>
-      <PageHeader title="Catering costs" subtitle="Record expenses and share them out to Client → Project → Site" />
-      <Tabs value={tab} onChange={setTab} tabs={[{ key: 'expenses', label: 'Expenses' }, { key: 'report', label: 'Cost by client / project / site' }]} />
-      {tab === 'expenses' ? <Expenses /> : <CostReport />}
+      <PageHeader title="Finance" subtitle="Invoices and delivery notes, budgets, and costs shared out to Client → Project → Site" />
+      <Tabs value={tab} onChange={setTab} tabs={[{ key: 'expenses', label: 'Expenses' }, { key: 'budgets', label: 'Budgets' }, { key: 'report', label: 'Cost by client / project / site' }]} />
+      {tab === 'expenses' && <Expenses />}
+      {tab === 'budgets' && <Budgets />}
+      {tab === 'report' && <CostReport />}
     </div>
   );
 }
@@ -21,21 +25,46 @@ export default function Finance() {
 function Expenses() {
   const { can } = useAuth();
   const kitchens = useOptions('/kitchens', (k) => ({ value: k.id, label: k.name }));
+  const purchases = useOptions(can('finance.manage') ? '/purchases?status=approved' : null, (p) => ({ value: p.id, label: `${p.items.slice(0, 50)} (${fmtMoney(p.estimated_amount)})` }));
+  const settings = useLoad(() => api.get('/settings'), []);
+  const limitRow = settings.data && settings.data.find((s) => s.setting_key === 'major_expense_threshold');
+  const limit = limitRow ? Number(limitRow.setting_value) : Infinity;
   const [alloc, setAlloc] = useState(null);
+  const [deciding, setDeciding] = useState(null);
   const [v, setV] = useState(0);
+  const canDecide = (r) => r.approval_status === 'pending' && (Number(r.amount) > limit ? can('approvals.major') : can('expenses.approve', 'approvals.major'));
   return (
     <>
-      <ResourcePage key={v} endpoint="/finance/expenses" noun="expense" canManage={can('finance.manage', 'catering.manage')} canDelete={can('finance.manage')}
-        filters={[{ name: 'category', label: 'Category', type: 'select', options: opts(CATEGORIES) }, { name: 'kitchen_id', label: 'Kitchen', type: 'select', options: kitchens }]}
+      {can('finance.manage') && <p className="muted small">Changing a validated expense sends it back for validation. Amounts above {fmtMoney(limit)} must be validated by the Managing Director.</p>}
+      <ResourcePage key={v} endpoint="/finance/expenses" noun="expense" canManage={can('finance.manage')} canDelete={can('finance.manage')}
+        filters={[{ name: 'category', label: 'Category', type: 'select', options: opts(CATEGORIES) }, { name: 'kitchen_id', label: 'Kitchen', type: 'select', options: kitchens },
+          { name: 'approval_status', label: 'Validation', type: 'select', options: opts(['pending', 'validated', 'rejected']) }]}
         newDefaults={{ expense_date: todayStr(), category: 'food' }}
         columns={[{ key: 'expense_date', label: 'Date', type: 'date' }, { key: 'category', label: 'Category', type: 'label' }, { key: 'supplier', label: 'Supplier' },
           { key: 'description', label: 'Description' }, { key: 'kitchen_name', label: 'Kitchen' }, { key: 'amount', label: 'Amount', num: true, render: (r) => fmtMoney(r.amount) },
+          { key: 'document_type', label: 'Document', type: 'label' },
+          { key: 'approval_status', label: 'Validation', render: (r) => <span title={r.approval_notes || ''}><Badge value={r.approval_status} />{r.approved_by_name && <small className="muted"> {r.approved_by_name}</small>}</span> },
           { key: 'allocated', label: 'Shared out', num: true, render: (r) => (Number(r.allocated_amount) ? `${fmtMoney(r.allocated_amount)} (${label(r.allocation_method)})` : <span className="muted">Not yet</span>) }]}
-        rowActions={(r) => can('finance.manage') && <button className="link" onClick={() => setAlloc(r)}>Share out</button>}
+        rowActions={(r) => (
+          <span className="row-actions">
+            {canDecide(r) && <button className="link" onClick={() => setDeciding(r)}>Validate</button>}
+            {can('finance.manage') && <button className="link" onClick={() => setAlloc(r)}>Share out</button>}
+          </span>
+        )}
         fields={[{ name: 'expense_date', label: 'Date', type: 'date', required: true }, { name: 'category', label: 'Category', type: 'select', options: opts(CATEGORIES), required: true },
+          { name: 'document_type', label: 'Document', type: 'select', options: opts(DOCS) }, { name: 'purchase_request_id', label: 'Approved purchase request (if any)', type: 'select', options: purchases },
           { name: 'amount', label: 'Amount', type: 'number', min: 0, required: true }, { name: 'kitchen_id', label: 'Kitchen (if any)', type: 'select', options: kitchens },
           { name: 'supplier', label: 'Supplier' }, { name: 'reference', label: 'Invoice / reference' }, { name: 'description', label: 'Description', wide: true }]} />
       {alloc && <AllocateModal expense={alloc} onClose={() => { setAlloc(null); setV((x) => x + 1); }} />}
+      {deciding && (
+        <Modal title={`Validate ${label(deciding.document_type)}: ${fmtMoney(deciding.amount)}`} onClose={() => setDeciding(null)}>
+          <p className="muted">{deciding.supplier} {deciding.reference && `· ${deciding.reference}`} · {deciding.description}</p>
+          <EntityForm submitLabel="Save" initial={{ decision: 'validated' }}
+            fields={[{ name: 'decision', label: 'Decision', type: 'select', required: true, options: opts(['validated', 'rejected']) }, { name: 'notes', label: 'Notes', wide: true }]}
+            onCancel={() => setDeciding(null)}
+            onSubmit={async (d) => { await api.post(`/finance/expenses/${deciding.id}/approve`, d); setDeciding(null); setV((x) => x + 1); }} />
+        </Modal>
+      )}
     </>
   );
 }
@@ -96,6 +125,41 @@ function AllocateModal({ expense, onClose }) {
       )}
       <div className="form-actions"><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn" onClick={save}>Save split</button></div>
     </Modal>
+  );
+}
+
+function Budgets() {
+  const { can } = useAuth();
+  const clients = useOptions('/structure/clients', (c) => ({ value: c.id, label: c.name }));
+  const projects = useOptions('/structure/projects', (p) => ({ value: p.id, label: `${p.name} (${p.client_name})` }));
+  const kitchens = useOptions('/kitchens', (k) => ({ value: k.id, label: k.name }));
+  const [deciding, setDeciding] = useState(null);
+  const [v, setV] = useState(0);
+  return (
+    <>
+      <p className="muted small">Choose a client, project or kitchen to limit what the budget covers, or leave all empty for all catering costs. Changing an approved budget sends it back for approval.</p>
+      <ResourcePage key={v} endpoint="/finance/budgets" noun="budget" canManage={can('budgets.manage')} canDelete={can('budgets.manage')} search={false}
+        filters={[{ name: 'status', label: 'Status', type: 'select', options: opts(['draft', 'approved', 'rejected']) }]}
+        newDefaults={{ period_start: `${todayStr().slice(0, 8)}01`, period_end: todayStr() }}
+        columns={[{ key: 'name', label: 'Budget' }, { key: 'covers', label: 'Covers', render: (b) => b.kitchen_name || b.project_name || b.client_name || 'All catering' },
+          { key: 'period_start', label: 'From', type: 'date' }, { key: 'period_end', label: 'To', type: 'date' },
+          { key: 'amount', label: 'Budget', num: true, render: (b) => fmtMoney(b.amount) }, { key: 'actual_amount', label: 'Spent', num: true, render: (b) => fmtMoney(b.actual_amount) },
+          { key: 'used', label: 'Used', num: true, render: (b) => (Number(b.amount) ? `${Math.round((Number(b.actual_amount) / Number(b.amount)) * 100)}%` : '') },
+          { key: 'status', label: 'Status', type: 'badge' }, { key: 'approved_by_name', label: 'Approved by' }]}
+        rowActions={(b) => can('budgets.approve') && b.status === 'draft' && <button className="link" onClick={() => setDeciding(b)}>Approve / reject</button>}
+        fields={[{ name: 'name', label: 'Name', required: true }, { name: 'amount', label: 'Amount', type: 'number', min: 0, required: true },
+          { name: 'period_start', label: 'From', type: 'date', required: true }, { name: 'period_end', label: 'To', type: 'date', required: true },
+          { name: 'client_id', label: 'Client', type: 'select', options: clients }, { name: 'project_id', label: 'Project', type: 'select', options: projects },
+          { name: 'kitchen_id', label: 'Kitchen', type: 'select', options: kitchens }, { name: 'notes', label: 'Notes', wide: true }]} />
+      {deciding && (
+        <Modal title={`Budget: ${deciding.name}`} onClose={() => setDeciding(null)}>
+          <EntityForm submitLabel="Save" initial={{ decision: 'approved' }}
+            fields={[{ name: 'decision', label: 'Decision', type: 'select', required: true, options: opts(['approved', 'rejected']) }]}
+            onCancel={() => setDeciding(null)}
+            onSubmit={async (d) => { await api.post(`/finance/budgets/${deciding.id}/decision`, d); setDeciding(null); setV((x) => x + 1); }} />
+        </Modal>
+      )}
+    </>
   );
 }
 

@@ -10,6 +10,7 @@ const db = require('../lib/db');
 const { audit } = require('../lib/audit');
 const { requirePerm, siteFilter, assertSite } = require('../lib/auth');
 const { wrap, bad, notFound, isDate, today } = require('../lib/http');
+const { getSettings, localNow } = require('../lib/settings');
 
 const router = express.Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -165,21 +166,50 @@ router.post('/sync/attendance', requirePerm('attendance.record', 'attendance.val
   res.json({ results, server_time: new Date().toISOString() });
 }));
 
-// Supervisor confirms the day's attendance for a site. Catering uses validated attendance only.
+// The Site Administrator submits the daily workforce report for a site. This confirms the day's
+// attendance (catering and payroll use confirmed attendance) and records whether it was on time.
 router.post('/attendance/validate', requirePerm('attendance.validate'), wrap(async (req, res) => {
-  const { site_id: siteId, date } = req.body || {};
+  const { site_id: siteId, date, notes } = req.body || {};
   if (!siteId || !isDate(date)) throw bad('site_id and date are required');
   assertSite(req.user, siteId);
-  const count = await db.tx(async (conn) => {
+  const settings = await getSettings();
+  const now = localNow(settings);
+  const deadline = settings.daily_report_deadline || '09:00';
+  const onTime = date > now.date || (date === now.date && now.time <= deadline) ? 1 : 0;
+  const result = await db.tx(async (conn) => {
     const [rows] = await conn.query('SELECT * FROM attendance WHERE site_id = ? AND work_date = ? AND validated = 0 FOR UPDATE', [siteId, date]);
     for (const r of rows) {
       await conn.query('UPDATE attendance SET validated = 1, validated_by = ?, validated_at = NOW(), version = version + 1 WHERE id = ?', [req.user.id, r.id]);
       await conn.query('INSERT INTO attendance_history (attendance_id, version, change_type, changed_by) VALUES (?,?,?,?)', [r.id, r.version + 1, 'validate', req.user.id]);
     }
-    return rows.length;
+    const [[t]] = await conn.query(
+      `SELECT COALESCE(SUM(status = 'present'), 0) AS p, COALESCE(SUM(status = 'absent'), 0) AS a, COALESCE(SUM(overtime_hours), 0) AS ot
+         FROM attendance WHERE site_id = ? AND work_date = ?`, [siteId, date]);
+    // The first submission decides whether the report was on time; later re-submissions update the figures only
+    await conn.query(
+      `INSERT INTO site_daily_reports (site_id, report_date, present_count, absent_count, overtime_hours, notes, on_time, submitted_by)
+       VALUES (?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE present_count = VALUES(present_count), absent_count = VALUES(absent_count),
+         overtime_hours = VALUES(overtime_hours), notes = COALESCE(VALUES(notes), notes), submitted_by = VALUES(submitted_by)`,
+      [siteId, date, t.p, t.a, t.ot, notes || null, onTime, req.user.id]);
+    const [[rep]] = await conn.query('SELECT * FROM site_daily_reports WHERE site_id = ? AND report_date = ?', [siteId, date]);
+    return { validated: rows.length, report: rep };
   });
-  await audit(req, 'validate', 'attendance', null, { site_id: siteId, date, count });
-  res.json({ validated: count });
+  await audit(req, 'submit_daily_report', 'attendance', null, { site_id: siteId, date, count: result.validated, on_time: result.report.on_time });
+  res.json({ ...result, deadline });
+}));
+
+// Daily workforce reports: who submitted, and whether before the deadline
+router.get('/attendance/daily-reports', requirePerm('attendance.view'), wrap(async (req, res) => {
+  const date = isDate(req.query.date) ? req.query.date : today();
+  const s = siteFilter(req.user, 's.id');
+  res.json(await db.query(
+    `SELECT s.id AS site_id, s.name AS site_name, p.name AS project_name, r.id, r.present_count, r.absent_count, r.overtime_hours,
+            r.on_time, r.submitted_at, r.notes, u.name AS submitted_by_name
+       FROM sites s JOIN projects p ON p.id = s.project_id
+       LEFT JOIN site_daily_reports r ON r.site_id = s.id AND r.report_date = ?
+       LEFT JOIN users u ON u.id = r.submitted_by
+      WHERE s.status = 'active' AND ${s.sql} ORDER BY p.name, s.name`, [date, ...s.params]));
 }));
 
 // Attendance list for reports

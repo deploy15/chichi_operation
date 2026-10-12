@@ -15,33 +15,53 @@ function workerScope(user) {
   return { sql: 't.id IN (SELECT wa.worker_id FROM worker_assignments wa WHERE wa.site_id IN (?))', params: [user.siteIds] };
 }
 
+const HR = ['workers.manage'];
+const ADMIN = ['workers.admin'];
+const PAY = ['payroll.manage'];
+const DEPLOY = ['assignments.manage'];
+
 crud(router, '/workers', {
-  table: 'workers', entity: 'worker', view: ['workers.view'], manage: ['workers.manage'],
+  // Who may change what (from the roles document):
+  //  - personal and job details: workers.manage (Recruitment Manager)
+  //  - contracts, insurance, CNSS: workers.admin (DAF, Recruitment Manager)
+  //  - pay rate and allowance: payroll.manage (DAF) - the Recruitment Manager cannot modify financial data
+  //  - deployment status: assignments.manage (Recruitment Manager)
+  table: 'workers', entity: 'worker', view: ['workers.view'],
+  manage: ['workers.manage', 'workers.admin', 'payroll.manage', 'assignments.manage'], create: ['workers.manage'],
   select: `t.*, (SELECT CONCAT(s.name, ' / ', p.name) FROM worker_assignments wa JOIN sites s ON s.id = wa.site_id
              JOIN projects p ON p.id = wa.project_id
             WHERE wa.worker_id = t.id AND wa.status = 'active' AND wa.start_date <= CURDATE()
               AND (wa.end_date IS NULL OR wa.end_date >= CURDATE()) ORDER BY wa.start_date DESC LIMIT 1) AS current_assignment`,
   search: ['t.worker_code', 't.first_name', 't.last_name', 't.phone', 't.national_id', 't.job_position'],
-  filters: { status: 't.status', category: 't.category' },
+  filters: { status: 't.status', category: 't.category', deployment_status: 't.deployment_status' },
   orderBy: 't.last_name, t.first_name',
   scope: workerScope,
   fields: {
-    worker_code: { type: 'string', required: true, max: 30, label: 'Worker ID' },
-    first_name: { type: 'string', required: true, max: 80, label: 'First name' },
-    last_name: { type: 'string', required: true, max: 80, label: 'Last name' },
-    gender: { type: 'enum', values: ['male', 'female', 'other'] },
-    date_of_birth: { type: 'date' },
-    national_id: { type: 'string', max: 60 },
-    phone: { type: 'string', max: 40 },
-    email: { type: 'string', max: 150, email: true },
-    address: { type: 'string', max: 255 },
-    emergency_contact_name: { type: 'string', max: 120 },
-    emergency_contact_phone: { type: 'string', max: 40 },
-    status: { type: 'enum', values: ['active', 'inactive', 'suspended', 'terminated'], default: 'active' },
-    job_position: { type: 'string', max: 100 },
-    category: { type: 'string', max: 60 },
-    pay_rate: { type: 'number', min: 0, default: 0 },
-    pay_rate_type: { type: 'enum', values: ['hourly', 'daily'], default: 'daily' },
+    worker_code: { perm: HR, type: 'string', required: true, max: 30, label: 'Worker ID' },
+    first_name: { perm: HR, type: 'string', required: true, max: 80, label: 'First name' },
+    last_name: { perm: HR, type: 'string', required: true, max: 80, label: 'Last name' },
+    gender: { perm: HR, type: 'enum', values: ['male', 'female', 'other'] },
+    date_of_birth: { perm: HR, type: 'date' },
+    national_id: { perm: HR, type: 'string', max: 60 },
+    phone: { perm: HR, type: 'string', max: 40 },
+    email: { perm: HR, type: 'string', max: 150, email: true },
+    address: { perm: HR, type: 'string', max: 255 },
+    emergency_contact_name: { perm: HR, type: 'string', max: 120 },
+    emergency_contact_phone: { perm: HR, type: 'string', max: 40 },
+    status: { perm: HR, type: 'enum', values: ['active', 'inactive', 'suspended', 'terminated'], default: 'active' },
+    job_position: { perm: HR, type: 'string', max: 100 },
+    category: { perm: HR, type: 'string', max: 60 },
+    deployment_status: { perm: DEPLOY, type: 'enum', values: ['available', 'deployed', 'absent', 'unassigned'] },
+    pay_rate: { perm: PAY, type: 'number', min: 0, default: 0 },
+    pay_rate_type: { perm: PAY, type: 'enum', values: ['hourly', 'daily'], default: 'daily' },
+    daily_allowance: { perm: PAY, type: 'number', min: 0, default: 0 },
+    contract_type: { perm: ADMIN, type: 'string', max: 40 },
+    contract_start: { perm: ADMIN, type: 'date' },
+    contract_end: { perm: ADMIN, type: 'date' },
+    cnss_number: { perm: ADMIN, type: 'string', max: 40 },
+    insurance_provider: { perm: ADMIN, type: 'string', max: 120 },
+    insurance_policy: { perm: ADMIN, type: 'string', max: 60 },
+    insurance_expiry: { perm: ADMIN, type: 'date' },
   },
 });
 
@@ -62,6 +82,7 @@ async function visibleWorker(req, id) {
 const ASSIGNMENT_SELECT = `
   SELECT wa.*, s.name AS site_name, p.name AS project_name, c.id AS client_id, c.name AS client_name,
          CONCAT(w.first_name, ' ', w.last_name) AS worker_name, w.worker_code,
+         (SELECT CONCAT(rw.first_name, ' ', rw.last_name) FROM workers rw WHERE rw.id = wa.replaces_worker_id) AS replaces_worker_name,
          (SELECT GROUP_CONCAT(me.meal_type ORDER BY me.meal_type) FROM meal_entitlements me WHERE me.assignment_id = wa.id) AS meals
     FROM worker_assignments wa
     JOIN workers w ON w.id = wa.worker_id
@@ -127,14 +148,23 @@ router.post('/workers/:id(\\d+)/assignments', requirePerm('assignments.manage'),
     if (overlap) {
       throw bad(`This worker already has an assignment at ${overlap.site_name} from ${overlap.start_date}${overlap.end_date ? ` to ${overlap.end_date}` : ' (no end date)'}. End it first, or tick "end the current assignment".`);
     }
+    // Pay is financial data: only payroll managers may set a different rate for this assignment
+    const canPay = req.user.can('payroll.manage');
+    const replaces = b.replaces_worker_id ? Number(b.replaces_worker_id) : null;
+    if (replaces === worker.id) throw bad('A worker cannot replace themselves');
     const [r] = await conn.query(
-      `INSERT INTO worker_assignments (worker_id, project_id, site_id, start_date, end_date, job_position, pay_rate, pay_rate_type, notes, created_by)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO worker_assignments (worker_id, project_id, site_id, start_date, end_date, job_position, pay_rate, pay_rate_type,
+         assignment_type, replaces_worker_id, staffing_request_id, notes, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [worker.id, site.project_id, site.id, b.start_date, b.end_date || null, b.job_position || worker.job_position,
-        b.pay_rate !== undefined && b.pay_rate !== '' ? Number(b.pay_rate) : worker.pay_rate,
-        ['hourly', 'daily'].includes(b.pay_rate_type) ? b.pay_rate_type : worker.pay_rate_type, b.notes || null, req.user.id]);
+        canPay && b.pay_rate !== undefined && b.pay_rate !== null && b.pay_rate !== '' ? Number(b.pay_rate) : worker.pay_rate,
+        canPay && ['hourly', 'daily'].includes(b.pay_rate_type) ? b.pay_rate_type : worker.pay_rate_type,
+        replaces ? 'replacement' : 'regular', replaces, b.staffing_request_id || null, b.notes || null, req.user.id]);
     for (const m of meals) await conn.query('INSERT INTO meal_entitlements (assignment_id, meal_type) VALUES (?,?)', [r.insertId, m]);
-    await audit(req, 'create', 'assignment', r.insertId, { worker_id: worker.id, site_id: site.id, start_date: b.start_date, end_date: b.end_date, meals }, conn);
+    if (b.start_date <= today()) await conn.query("UPDATE workers SET deployment_status = 'deployed' WHERE id = ?", [worker.id]);
+    // Replacing an absent or sick worker marks them absent
+    if (replaces) await conn.query("UPDATE workers SET deployment_status = 'absent' WHERE id = ?", [replaces]);
+    await audit(req, 'create', 'assignment', r.insertId, { worker_id: worker.id, site_id: site.id, start_date: b.start_date, end_date: b.end_date, meals, replaces_worker_id: replaces }, conn);
     return r.insertId;
   });
   res.status(201).json(withMeals(await db.one(`${ASSIGNMENT_SELECT} WHERE wa.id = ?`, [id])));
@@ -155,6 +185,11 @@ router.post('/assignments/:id(\\d+)/end', requirePerm('assignments.manage'), wra
   if (!isDate(endDate) || endDate < a.start_date) throw bad('End date must be on or after the start date');
   await db.query("UPDATE worker_assignments SET end_date = ?, status = 'ended', end_reason = ?, ended_by = ?, ended_at = NOW() WHERE id = ?",
     [endDate, req.body.reason || null, req.user.id, a.id]);
+  if (endDate <= today()) {
+    const still = await db.one(`SELECT id FROM worker_assignments WHERE worker_id = ? AND status = 'active' AND start_date <= CURDATE()
+      AND (end_date IS NULL OR end_date > ?)`, [a.worker_id, endDate]);
+    if (!still) await db.query("UPDATE workers SET deployment_status = 'available' WHERE id = ? AND deployment_status = 'deployed'", [a.worker_id]);
+  }
   await audit(req, 'end', 'assignment', a.id, { end_date: endDate, reason: req.body.reason });
   res.json(withMeals(await db.one(`${ASSIGNMENT_SELECT} WHERE wa.id = ?`, [a.id])));
 }));
@@ -178,7 +213,7 @@ router.get('/workers/:id(\\d+)/documents', requirePerm('workers.view'), wrap(asy
             file_data IS NOT NULL AS has_file FROM worker_documents WHERE worker_id = ? ORDER BY created_at DESC`, [req.params.id]));
 }));
 
-router.post('/workers/:id(\\d+)/documents', requirePerm('workers.manage'), wrap(async (req, res) => {
+router.post('/workers/:id(\\d+)/documents', requirePerm('workers.manage', 'workers.admin'), wrap(async (req, res) => {
   await visibleWorker(req, req.params.id);
   const b = req.body || {};
   if (!b.doc_type) throw bad('Document type is required');
@@ -205,7 +240,7 @@ router.get('/documents/:id(\\d+)/file', requirePerm('workers.view'), wrap(async 
   res.send(d.file_data);
 }));
 
-router.delete('/documents/:id(\\d+)', requirePerm('workers.manage'), wrap(async (req, res) => {
+router.delete('/documents/:id(\\d+)', requirePerm('workers.manage', 'workers.admin'), wrap(async (req, res) => {
   const d = await db.one('SELECT worker_id, doc_type FROM worker_documents WHERE id = ?', [req.params.id]);
   if (!d) throw notFound('Document');
   await visibleWorker(req, d.worker_id);

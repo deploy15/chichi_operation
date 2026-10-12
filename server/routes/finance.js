@@ -4,17 +4,19 @@ const db = require('../lib/db');
 const { crud } = require('../lib/crud');
 const { audit } = require('../lib/audit');
 const { requirePerm, siteFilter } = require('../lib/auth');
-const { wrap, bad, notFound, isDate } = require('../lib/http');
+const { wrap, bad, notFound, forbidden, isDate } = require('../lib/http');
+const { getSettings } = require('../lib/settings');
 
 const router = express.Router();
 
 crud(router, '/finance/expenses', {
-  table: 'catering_expenses', entity: 'catering_expense', view: ['finance.view', 'catering.manage'], manage: ['finance.manage', 'catering.manage'],
-  select: `t.*, k.name AS kitchen_name,
+  // Only finance can record or change expenses; the Catering Director can only view them
+  table: 'catering_expenses', entity: 'catering_expense', view: ['finance.view'], manage: ['finance.manage'],
+  select: `t.*, k.name AS kitchen_name, au.name AS approved_by_name,
            COALESCE((SELECT SUM(a.amount) FROM catering_cost_allocations a WHERE a.expense_id = t.id), 0) AS allocated_amount,
            (SELECT MIN(a.method) FROM catering_cost_allocations a WHERE a.expense_id = t.id) AS allocation_method`,
-  from: 'catering_expenses t LEFT JOIN kitchens k ON k.id = t.kitchen_id',
-  filters: { kitchen_id: 't.kitchen_id', category: 't.category' }, search: ['t.supplier', 't.description', 't.reference'],
+  from: 'catering_expenses t LEFT JOIN kitchens k ON k.id = t.kitchen_id LEFT JOIN users au ON au.id = t.approved_by',
+  filters: { kitchen_id: 't.kitchen_id', category: 't.category', approval_status: 't.approval_status' }, search: ['t.supplier', 't.description', 't.reference'],
   orderBy: 't.expense_date DESC, t.id DESC', allowDelete: true,
   fields: {
     kitchen_id: { type: 'int' },
@@ -24,10 +26,78 @@ crud(router, '/finance/expenses', {
     description: { type: 'string', max: 255 },
     amount: { type: 'number', required: true, min: 0, label: 'Amount' },
     reference: { type: 'string', max: 80 },
+    document_type: { type: 'enum', values: ['invoice', 'purchase_order', 'delivery_note', 'receipt', 'other'], default: 'invoice' },
+    purchase_request_id: { type: 'int' },
+  },
+  beforeWrite: async (data, req, existing) => {
+    // A validated expense is locked; changing it sends it back for validation
+    if (existing && existing.approval_status !== 'pending') Object.assign(data, { approval_status: 'pending', approved_by: null, approved_at: null });
+    if (data.purchase_request_id) {
+      const pr = await db.one('SELECT status FROM purchase_requests WHERE id = ?', [data.purchase_request_id]);
+      if (!pr || pr.status !== 'approved') throw bad('The linked purchase request must be approved');
+    }
+    return data;
   },
 });
 
-router.get('/finance/expenses/:id(\\d+)/allocations', requirePerm('finance.view', 'catering.manage'), wrap(async (req, res) => {
+// Validate (or reject) an invoice, purchase order or delivery note. Major amounts need the Managing Director.
+router.post('/finance/expenses/:id(\\d+)/approve', requirePerm('expenses.approve', 'approvals.major'), wrap(async (req, res) => {
+  const exp = await db.one('SELECT * FROM catering_expenses WHERE id = ?', [req.params.id]);
+  if (!exp) throw notFound('Expense');
+  const decision = req.body.decision;
+  if (!['validated', 'rejected'].includes(decision)) throw bad('Decision must be validated or rejected');
+  const settings = await getSettings();
+  if (Number(exp.amount) > Number(settings.major_expense_threshold || Infinity) && !req.user.can('approvals.major')) {
+    throw forbidden('This is a major expense: only the Managing Director can validate it');
+  }
+  if (!req.user.can('expenses.approve') && !req.user.can('approvals.major')) throw forbidden();
+  await db.query('UPDATE catering_expenses SET approval_status = ?, approved_by = ?, approved_at = NOW(), approval_notes = ? WHERE id = ?',
+    [decision, req.user.id, req.body.notes || null, exp.id]);
+  await audit(req, decision, 'catering_expense', exp.id, { notes: req.body.notes });
+  res.json({ ok: true });
+}));
+
+// ---------- Budgets ----------
+crud(router, '/finance/budgets', {
+  table: 'budgets', entity: 'budget', view: ['finance.view'], manage: ['budgets.manage'],
+  select: `t.*, c.name AS client_name, p.name AS project_name, k.name AS kitchen_name, u.name AS approved_by_name,
+    CASE
+      WHEN t.kitchen_id IS NOT NULL THEN (SELECT COALESCE(SUM(e.amount), 0) FROM catering_expenses e WHERE e.kitchen_id = t.kitchen_id AND e.expense_date BETWEEN t.period_start AND t.period_end AND e.approval_status <> 'rejected')
+      WHEN t.project_id IS NOT NULL THEN (SELECT COALESCE(SUM(a.amount), 0) FROM catering_cost_allocations a JOIN catering_expenses e ON e.id = a.expense_id WHERE a.project_id = t.project_id AND e.expense_date BETWEEN t.period_start AND t.period_end)
+      WHEN t.client_id IS NOT NULL THEN (SELECT COALESCE(SUM(a.amount), 0) FROM catering_cost_allocations a JOIN catering_expenses e ON e.id = a.expense_id WHERE a.client_id = t.client_id AND e.expense_date BETWEEN t.period_start AND t.period_end)
+      ELSE (SELECT COALESCE(SUM(e.amount), 0) FROM catering_expenses e WHERE e.expense_date BETWEEN t.period_start AND t.period_end AND e.approval_status <> 'rejected')
+    END AS actual_amount`,
+  from: 'budgets t LEFT JOIN clients c ON c.id = t.client_id LEFT JOIN projects p ON p.id = t.project_id LEFT JOIN kitchens k ON k.id = t.kitchen_id LEFT JOIN users u ON u.id = t.approved_by',
+  filters: { status: 't.status' }, orderBy: 't.period_start DESC, t.name', allowDelete: true,
+  fields: {
+    name: { type: 'string', required: true, max: 150, label: 'Name' },
+    client_id: { type: 'int' }, project_id: { type: 'int' }, kitchen_id: { type: 'int' },
+    period_start: { type: 'date', required: true, label: 'From' },
+    period_end: { type: 'date', required: true, label: 'To' },
+    amount: { type: 'number', required: true, min: 0, label: 'Amount' },
+    notes: { type: 'string', max: 500 },
+  },
+  beforeWrite: (data, req, existing) => {
+    const m = { ...(existing || {}), ...data };
+    if (m.period_end < m.period_start) throw bad('The end date must be after the start date');
+    // Editing an approved budget sends it back for approval
+    if (existing && existing.status !== 'draft') Object.assign(data, { status: 'draft', approved_by: null, approved_at: null });
+    if (!existing) data.created_by = req.user.id;
+    return data;
+  },
+});
+
+router.post('/finance/budgets/:id(\\d+)/decision', requirePerm('budgets.approve'), wrap(async (req, res) => {
+  const b = await db.one('SELECT * FROM budgets WHERE id = ?', [req.params.id]);
+  if (!b) throw notFound('Budget');
+  const decision = req.body.decision;
+  if (!['approved', 'rejected'].includes(decision)) throw bad('Decision must be approved or rejected');
+  await db.query('UPDATE budgets SET status = ?, approved_by = ?, approved_at = NOW() WHERE id = ?', [decision, req.user.id, b.id]);
+  await audit(req, decision, 'budget', b.id);
+  res.json({ ok: true });
+}));
+
+router.get('/finance/expenses/:id(\\d+)/allocations', requirePerm('finance.view'), wrap(async (req, res) => {
   res.json(await db.query(
     `SELECT a.*, c.name AS client_name, p.name AS project_name, s.name AS site_name FROM catering_cost_allocations a
        JOIN clients c ON c.id = a.client_id JOIN projects p ON p.id = a.project_id JOIN sites s ON s.id = a.site_id

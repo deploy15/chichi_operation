@@ -50,7 +50,7 @@ async function main() {
   // Workers and assignments
   const first = ['Amina', 'Kwame', 'Fatou', 'Moussa', 'Grace', 'Ibrahim', 'Esther', 'Samuel', 'Aisha', 'Daniel', 'Mariam', 'Joseph', 'Ruth', 'Paul', 'Zainab', 'Peter', 'Halima', 'David', 'Sarah', 'Musa'];
   const last = ['Okafor', 'Mensah', 'Diallo', 'Traore', 'Banda', 'Kamara', 'Mwangi', 'Ndlovu', 'Sow', 'Owusu'];
-  const positions = [['Labourer', 'General', 'daily', 25], ['Mason', 'Skilled', 'daily', 40], ['Driver', 'Skilled', 'hourly', 6], ['Electrician', 'Skilled', 'hourly', 8], ['Supervisor', 'Supervisory', 'daily', 60]];
+  const positions = [['Labourer', 'General', 'daily', 5000], ['Mason', 'Skilled', 'daily', 8000], ['Driver', 'Skilled', 'hourly', 1200], ['Electrician', 'Skilled', 'hourly', 1500], ['Supervisor', 'Supervisory', 'daily', 12000]];
   const assignments = [];
   for (let i = 0; i < 42; i++) {
     const [pos, cat, rateType, rate] = positions[i % positions.length];
@@ -72,14 +72,21 @@ async function main() {
   const hash = await bcrypt.hash('Demo1234!', 10);
   const users = {};
   for (const [email, name, role] of [
-    ['director@demo.local', 'Diana Director', 'Management / Director'], ['hr@demo.local', 'Harry HR', 'Human Resources'],
-    ['site1@demo.local', 'Sam Site-Manager', 'Site Manager'], ['catering@demo.local', 'Carla Catering', 'Catering Department'],
-    ['kitchen@demo.local', 'Ken Kitchen', 'Kitchen Manager'], ['housing@demo.local', 'Abby Accommodation', 'Accommodation Manager'],
-    ['medical@demo.local', 'Dr. Mia Medical', 'Medical Department'], ['hse@demo.local', 'Hank HSE', 'HSE Manager'], ['finance@demo.local', 'Fiona Finance', 'Accounting / Finance'],
+    ['md@demo.local', 'Diana Director', 'Managing Director (MD / DG)'],
+    ['daf@demo.local', 'Fiona Finance', 'Finance & Administration Director (DAF)'],
+    ['recruitment@demo.local', 'Harry Recruiter', 'Recruitment Manager (RRJ / HR Casual Workers)'],
+    ['site1@demo.local', 'Sam Site-Admin', 'Site Administrator'],
+    ['chef@demo.local', 'Carla Head-Chef', 'Catering Director (DC / Head Chef)'],
+    ['souschef@demo.local', 'Ken Sous-Chef', 'Sous-Chef'],
+    ['transport@demo.local', 'Tom Transport', 'Dishwashing, Sealing & Transport Team'],
+    ['housing@demo.local', 'Abby Accommodation', 'Accommodation Manager'],
+    ['medical@demo.local', 'Dr. Mia Medical', 'Medical Department'], ['hse@demo.local', 'Hank HSE', 'HSE Manager'],
   ]) users[email] = await ins('users', { name, email, password_hash: hash, role_id: roles[role] });
   await ins('user_sites', { user_id: users['site1@demo.local'], site_id: sites[0].id });
   await ins('user_sites', { user_id: users['site1@demo.local'], site_id: sites[1].id });
-  await ins('user_kitchens', { user_id: users['kitchen@demo.local'], kitchen_id: temp });
+  await ins('user_kitchens', { user_id: users['souschef@demo.local'], kitchen_id: central });
+  await ins('user_kitchens', { user_id: users['transport@demo.local'], kitchen_id: central });
+  for (const a of assignments) await db.query("UPDATE workers SET deployment_status = 'deployed' WHERE id = ?", [a.worker_id]);
 
   // Attendance for the last 10 days (validated), none yet for today
   for (let day = -10; day <= -1; day++) {
@@ -113,7 +120,8 @@ async function main() {
   await ins('hse_corrective_actions', { incident_id: inc1, description: 'Provide cut-resistant gloves to all metal workers', responsible_name: 'Site Supervisor', due_date: d(-1) });
   const inc2 = await ins('hse_incidents', { occurred_at: `${d(-40)} 15:00:00`, client_id: clientB, project_id: projZ, site_id: sites[5].id, incident_type: 'near_miss',
     description: 'Truck reversed without a spotter.', severity: 'high', status: 'closed', closed_at: `${d(-30)} 09:00:00`, reported_by: users['hse@demo.local'] });
-  await ins('hse_corrective_actions', { incident_id: inc2, description: 'Spotter training for all drivers', responsible_name: 'Transport lead', due_date: d(-32), status: 'done', completed_at: `${d(-33)} 12:00:00` });
+  await ins('hse_corrective_actions', { incident_id: inc2, description: 'Spotter training for all drivers', responsible_name: 'Transport lead', due_date: d(-32), status: 'done', completed_at: `${d(-33)} 12:00:00`,
+    approved_by: users['md@demo.local'], approved_at: `${d(-31)} 09:00:00` });
 
   // Medical
   await ins('medical_records', { worker_id: assignments[0].worker_id, record_type: 'incident_followup', record_date: d(-5), title: 'Hand laceration follow-up', status: 'open', hse_incident_id: inc1 });
@@ -121,8 +129,31 @@ async function main() {
   await ins('medical_records', { worker_id: assignments[2].worker_id, record_type: 'appointment', record_date: d(3), title: 'Pre-employment examination', status: 'scheduled' });
 
   // Catering expenses
-  await ins('catering_expenses', { kitchen_id: central, expense_date: d(-3), category: 'food', supplier: 'Fresh Foods Ltd', description: 'Weekly food purchase', amount: 3200 });
-  await ins('catering_expenses', { kitchen_id: temp, expense_date: d(-2), category: 'fuel', supplier: 'Fuel Co', description: 'Generator fuel', amount: 450 });
+  await ins('catering_expenses', { kitchen_id: central, expense_date: d(-3), category: 'food', supplier: 'Fresh Foods Ltd', description: 'Weekly food purchase', amount: 320000,
+    document_type: 'invoice', approval_status: 'validated', approved_by: users['daf@demo.local'], approved_at: `${d(-2)} 10:00:00` });
+  await ins('catering_expenses', { kitchen_id: temp, expense_date: d(-2), category: 'fuel', supplier: 'Fuel Co', description: 'Generator fuel', amount: 45000, document_type: 'delivery_note' });
+
+  // Menus, a production plan for today and a delivery waiting to be loaded
+  const menuL = await ins('menus', { name: 'Rice & chicken stew', meal_type: 'lunch', dishes: 'Rice, chicken stew, fruit', created_by: users['chef@demo.local'] });
+  await ins('menus', { name: 'Beans & plantain', meal_type: 'dinner', dishes: 'Beans, fried plantain, bread', created_by: users['chef@demo.local'] });
+  const plan = await ins('meal_plans', { kitchen_id: central, service_date: d(0), meal_type: 'lunch', required_qty: 30, planned_qty: 32, menu_id: menuL,
+    menu: 'Rice & chicken stew', status: 'in_production', created_by: users['chef@demo.local'] });
+  await ins('production_batches', { meal_plan_id: plan, produced_qty: 32, produced_at: `${d(0)} 07:30:00`, quality_status: 'approved',
+    quality_checked_by: users['chef@demo.local'], quality_checked_at: `${d(0)} 08:00:00`, recorded_by: users['souschef@demo.local'] });
+  await ins('dispatches', { meal_plan_id: plan, kitchen_id: central, site_id: sites[0].id, service_date: d(0), meal_type: 'lunch', planned_qty: 8, dispatched_qty: 8,
+    planned_departure: `${d(0)} 10:30:00`, status: 'validated', vehicle: 'Van 1', validated_by: users['chef@demo.local'], validated_at: `${d(0)} 08:15:00`, recorded_by: users['chef@demo.local'] });
+  await ins('operation_logs', { log_type: 'ingredient_prep', kitchen_id: central, description: 'Rice washed, chicken cut (40 kg)', log_date: d(0), recorded_by: users['souschef@demo.local'] });
+  await ins('operation_logs', { log_type: 'site_delay', site_id: sites[0].id, description: 'Lunch arrived 40 minutes late yesterday', log_date: d(-1), recorded_by: users['site1@demo.local'] });
+
+  // Recruitment, staffing and purchasing examples
+  const jp = await ins('job_profiles', { title: 'Mason', category: 'Skilled', requirements: '2 years experience', required_documents: 'ID card, trade certificate', created_by: users['recruitment@demo.local'] });
+  await ins('candidates', { job_profile_id: jp, first_name: 'Yaw', last_name: 'Boateng', phone: '+000 555 2001', national_id: 'ID-77881', qualifications: 'Trade certificate (masonry)', registered_by: users['recruitment@demo.local'] });
+  await ins('staffing_requests', { site_id: sites[0].id, requested_by_client: 'Jane Doe (Client A)', job_position: 'Labourer', quantity: 3, needed_from: d(2),
+    details: 'Extra hands for concrete pour', status: 'forwarded', received_by: users['site1@demo.local'], forwarded_at: `${d(0)} 07:00:00` });
+  await ins('purchase_requests', { kitchen_id: central, items: '200 kg rice, 60 L cooking oil', supplier: 'Fresh Foods Ltd', estimated_amount: 250000, needed_by: d(3),
+    justification: 'Rice below reorder level', requested_by: users['chef@demo.local'] });
+  await ins('purchase_requests', { kitchen_id: temp, items: 'New cold room compressor', estimated_amount: 2500000, requires_major_approval: 1,
+    justification: 'Cold room failing at Highlands kitchen', requested_by: users['chef@demo.local'] });
 
   // Meal requirements for the past days so cost sharing by meal count has data
   for (let day = -10; day <= -1; day++) {

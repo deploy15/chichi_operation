@@ -51,7 +51,8 @@ async function visibleIncident(req, id) {
 
 router.get('/hse/incidents/:id(\\d+)', requirePerm('hse.view', 'hse.report'), wrap(async (req, res) => {
   const i = await visibleIncident(req, req.params.id);
-  i.actions = await db.query('SELECT * FROM hse_corrective_actions WHERE incident_id = ? ORDER BY due_date', [i.id]);
+  i.actions = await db.query(`SELECT a.*, u.name AS approved_by_name FROM hse_corrective_actions a LEFT JOIN users u ON u.id = a.approved_by
+    WHERE a.incident_id = ? ORDER BY a.due_date`, [i.id]);
   i.attachments = await db.query('SELECT id, file_name, file_mime, file_size, created_at FROM hse_attachments WHERE incident_id = ? ORDER BY id', [i.id]);
   res.json(i);
 }));
@@ -107,11 +108,23 @@ router.put('/hse/actions/:id(\\d+)', requirePerm('hse.manage'), wrap(async (req,
     status: { type: 'enum', values: ['open', 'in_progress', 'done'] },
   }, req.body || {}, { partial: true });
   if (data.status === 'done' && a.status !== 'done') data.completed_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  if (data.status && data.status !== 'done') data.completed_at = null;
+  if (data.status && data.status !== 'done') Object.assign(data, { completed_at: null, approved_by: null, approved_at: null });
   const cols = Object.keys(data);
   if (cols.length) await db.query(`UPDATE hse_corrective_actions SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, [...cols.map((c) => data[c]), a.id]);
   await audit(req, 'update', 'hse_action', a.id, data);
   res.json(await db.one('SELECT * FROM hse_corrective_actions WHERE id = ?', [a.id]));
+}));
+
+// The Managing Director approves corrective actions once they are done
+router.post('/hse/actions/:id(\\d+)/approve', requirePerm('hse.approve'), wrap(async (req, res) => {
+  const a = await db.one('SELECT * FROM hse_corrective_actions WHERE id = ?', [req.params.id]);
+  if (!a) throw notFound('Action');
+  await visibleIncident(req, a.incident_id);
+  if (a.status !== 'done') throw bad('Only completed actions can be approved');
+  if (a.approved_at) throw bad('Already approved');
+  await db.query('UPDATE hse_corrective_actions SET approved_by = ?, approved_at = NOW() WHERE id = ?', [req.user.id, a.id]);
+  await audit(req, 'approve', 'hse_action', a.id);
+  res.json({ ok: true });
 }));
 
 router.post('/hse/incidents/:id(\\d+)/attachments', requirePerm('hse.report', 'hse.manage'), wrap(async (req, res) => {
@@ -151,6 +164,8 @@ router.get('/hse/dashboard', requirePerm('hse.view'), wrap(async (req, res) => {
     by_type: await db.query(`SELECT i.incident_type AS label, COUNT(*) AS value FROM hse_incidents i ${W} GROUP BY i.incident_type ORDER BY value DESC`, P),
     trend: await db.query(`SELECT DATE_FORMAT(i.occurred_at, '%Y-%m') AS label, COUNT(*) AS value FROM hse_incidents i ${W}
       AND i.occurred_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH) GROUP BY label ORDER BY label`, P),
+    awaiting_approval: await db.query(`SELECT a.*, s.name AS site_name FROM hse_corrective_actions a JOIN hse_incidents i ON i.id = a.incident_id
+      JOIN sites s ON s.id = i.site_id ${W} AND a.status = 'done' AND a.approved_at IS NULL ORDER BY a.completed_at`, P),
     overdue_actions: await db.query(`SELECT a.*, s.name AS site_name, i.incident_type, i.occurred_at FROM hse_corrective_actions a
       JOIN hse_incidents i ON i.id = a.incident_id JOIN sites s ON s.id = i.site_id ${W} AND a.status <> 'done' AND a.due_date < CURDATE() ORDER BY a.due_date`, P),
   });

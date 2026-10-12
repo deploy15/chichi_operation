@@ -16,20 +16,26 @@ import Hse from './pages/Hse';
 import Payroll from './pages/Payroll';
 import Admin from './pages/Admin';
 import Account from './pages/Account';
+import Recruitment from './pages/Recruitment';
+import Staffing from './pages/Staffing';
+import Purchases from './pages/Purchases';
 
 // Menu items appear only if the user's role allows them
 const NAV = [
   { to: '/', label: 'Dashboard', perms: ['dashboard.view'], end: true },
   { to: '/attendance', label: 'Attendance', perms: ['attendance.view', 'attendance.record'] },
   { to: '/workers', label: 'Workers', perms: ['workers.view'] },
+  { to: '/recruitment', label: 'Recruitment', perms: ['recruitment.manage', 'recruitment.verify', 'recruitment.approve'] },
+  { to: '/staffing', label: 'Staffing requests', perms: ['staffing.request', 'staffing.manage'] },
   { to: '/organisation', label: 'Clients & Sites', perms: ['structure.view'] },
-  { to: '/catering', label: 'Catering', perms: ['catering.view', 'meals.receive'] },
+  { to: '/catering', label: 'Catering & Kitchen', perms: ['catering.view', 'kitchen.view', 'meals.receive', 'catering.feedback', 'stock.view', 'stock.report'] },
+  { to: '/purchases', label: 'Purchases', perms: ['purchases.request', 'purchases.approve', 'approvals.major'] },
   { to: '/accommodation', label: 'Accommodation', perms: ['accommodation.view'] },
   { to: '/hse', label: 'HSE & Incidents', perms: ['hse.view', 'hse.report'] },
   { to: '/medical', label: 'Medical', perms: ['medical.view'] },
   { to: '/payroll', label: 'Payroll', perms: ['payroll.view'] },
-  { to: '/finance', label: 'Costs', perms: ['finance.view'] },
-  { to: '/admin', label: 'Users & Settings', perms: ['users.manage', 'audit.view'] },
+  { to: '/finance', label: 'Finance', perms: ['finance.view'] },
+  { to: '/admin', label: 'Users & Settings', perms: ['users.manage', 'audit.view', 'settings.manage', 'payroll.manage'] },
 ];
 
 function SyncBadge() {
@@ -72,6 +78,9 @@ export default function App() {
           <Route path="/attendance" element={<Attendance />} />
           <Route path="/workers" element={<Workers />} />
           <Route path="/workers/:id" element={<WorkerDetail />} />
+          <Route path="/recruitment" element={<Recruitment />} />
+          <Route path="/staffing" element={<Staffing />} />
+          <Route path="/purchases" element={<Purchases />} />
           <Route path="/organisation" element={<Structure />} />
           <Route path="/catering" element={<Catering />} />
           <Route path="/finance" element={<Finance />} />

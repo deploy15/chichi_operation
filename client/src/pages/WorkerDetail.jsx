@@ -3,8 +3,8 @@ import { Link, useParams } from 'react-router-dom';
 import { api, fileToBase64, openFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtDate, fmtMoney, label, todayStr } from '../lib/format';
-import { Alert, Badge, Card, EntityForm, ErrorMsg, Loading, Modal, PageHeader, Table, useLoad } from '../components/ui';
-import { WORKER_FIELDS } from './workerFields';
+import { Alert, Badge, Card, EntityForm, ErrorMsg, Loading, Modal, PageHeader, Table, useLoad, useOptions } from '../components/ui';
+import { workerFieldsFor } from './workerFields';
 
 const MEAL_OPTS = [{ value: 'lunch', label: 'Lunch' }, { value: 'dinner', label: 'Dinner' }];
 
@@ -15,6 +15,9 @@ export default function WorkerDetail() {
   const assignments = useLoad(() => api.get(`/workers/${id}/assignments`), [id]);
   const docs = useLoad(() => api.get(`/workers/${id}/documents`), [id]);
   const tree = useLoad(() => api.get('/structure/tree'), []);
+  const workerOptions = useOptions(can('assignments.manage') ? '/workers?status=active' : null, (x) => ({ value: x.id, label: `${x.first_name} ${x.last_name} (${x.worker_code})${x.current_assignment ? ` — ${x.current_assignment}` : ''}` }));
+  const requestOptions = useOptions(can('staffing.manage') ? '/staffing-requests' : null,
+    (r) => ({ value: r.id, label: `${r.site_name}: ${r.quantity} × ${r.job_position} from ${fmtDate(r.needed_from)} (${label(r.status)})` }));
   const [modal, setModal] = useState(null);
   const [msg, setMsg] = useState(null);
 
@@ -23,12 +26,15 @@ export default function WorkerDetail() {
   const w = worker.data;
   const siteOptions = (tree.data || []).flatMap((c) => c.projects.flatMap((p) => p.sites.map((s) => ({ value: s.id, label: `${s.name} — ${p.name} (${c.name})` }))));
   const hasOpen = (assignments.data || []).some((a) => a.status === 'active' && !a.end_date);
+  const fields = workerFieldsFor(can);
+  const canEdit = fields.some((f) => !f.readOnly);
+  const canDocs = can('workers.manage', 'workers.admin');
 
   return (
     <div>
       <p><Link to="/workers">← All workers</Link></p>
       <PageHeader title={`${w.first_name} ${w.last_name}`} subtitle={`${w.worker_code} · ${w.job_position || 'No position'} · ${w.category || 'No category'}`}
-        actions={<><Badge value={w.status} />{can('workers.manage') && <button className="btn btn-ghost" onClick={() => setModal('edit')}>Edit details</button>}</>} />
+        actions={<><Badge value={w.deployment_status} /><Badge value={w.status} />{canEdit && <button className="btn btn-ghost" onClick={() => setModal('edit')}>Edit details</button>}</>} />
       <Alert tone="success" onClose={() => setMsg(null)}>{msg}</Alert>
       <div className="grid-2">
         <Card title="Contact and identity">
@@ -36,14 +42,22 @@ export default function WorkerDetail() {
             <dt>Phone</dt><dd>{w.phone}</dd><dt>Email</dt><dd>{w.email}</dd><dt>Address</dt><dd>{w.address}</dd>
             <dt>Date of birth</dt><dd>{fmtDate(w.date_of_birth)}</dd><dt>National ID</dt><dd>{w.national_id}</dd>
             <dt>Emergency contact</dt><dd>{w.emergency_contact_name} {w.emergency_contact_phone}</dd>
-            <dt>Pay rate</dt><dd>{fmtMoney(w.pay_rate)} per {w.pay_rate_type === 'hourly' ? 'hour' : 'day'}</dd>
           </dl>
         </Card>
-        <Card title="Documents" actions={can('workers.manage') && <button className="btn btn-small" onClick={() => setModal('doc')}>+ Add document</button>}>
+        <Card title="Contract, insurance and pay">
+          <dl className="details">
+            <dt>Contract</dt><dd>{w.contract_type} {w.contract_start && `from ${fmtDate(w.contract_start)}`} {w.contract_end && `to ${fmtDate(w.contract_end)}`}</dd>
+            <dt>CNSS no.</dt><dd>{w.cnss_number}</dd>
+            <dt>Insurance</dt><dd>{w.insurance_provider} {w.insurance_policy} {w.insurance_expiry && `(expires ${fmtDate(w.insurance_expiry)})`}</dd>
+            {can('payroll.view') && <><dt>Pay rate</dt><dd>{fmtMoney(w.pay_rate)} per {w.pay_rate_type === 'hourly' ? 'hour' : 'day'}</dd>
+              <dt>Daily allowance</dt><dd>{fmtMoney(w.daily_allowance)}</dd></>}
+          </dl>
+        </Card>
+        <Card title="Documents" actions={canDocs && <button className="btn btn-small" onClick={() => setModal('doc')}>+ Add document</button>}>
           <Table rows={docs.data} empty="No documents yet."
             columns={[{ key: 'doc_type', label: 'Type' }, { key: 'doc_number', label: 'Number' }, { key: 'expiry_date', label: 'Expires', type: 'date' },
               { key: 'file', label: 'File', render: (d) => (d.has_file ? <button className="link" onClick={() => openFile(`/documents/${d.id}/file`, d.file_name)}>{d.file_name}</button> : '') },
-              { key: 'del', label: '', render: (d) => can('workers.manage') && <button className="link danger" onClick={async () => { if (window.confirm('Delete this document?')) { await api.del(`/documents/${d.id}`); docs.reload(); } }}>Delete</button> }]} />
+              { key: 'del', label: '', render: (d) => canDocs && <button className="link danger" onClick={async () => { if (window.confirm('Delete this document?')) { await api.del(`/documents/${d.id}`); docs.reload(); } }}>Delete</button> }]} />
         </Card>
       </div>
       <Card title="Assignment history" actions={can('assignments.manage') && <button className="btn btn-small" onClick={() => setModal('assign')}>+ New assignment</button>}>
@@ -52,7 +66,9 @@ export default function WorkerDetail() {
           columns={[
             { key: 'client_name', label: 'Client' }, { key: 'project_name', label: 'Project' }, { key: 'site_name', label: 'Site' },
             { key: 'start_date', label: 'From', type: 'date' }, { key: 'end_date', label: 'To', render: (a) => (a.end_date ? fmtDate(a.end_date) : 'Ongoing') },
-            { key: 'job_position', label: 'Position' }, { key: 'pay', label: 'Rate', render: (a) => `${fmtMoney(a.pay_rate)}/${a.pay_rate_type === 'hourly' ? 'h' : 'day'}` },
+            { key: 'job_position', label: 'Position' },
+            { key: 'assignment_type', label: 'Type', render: (a) => (a.assignment_type === 'replacement' ? <span><Badge value="replacement" />{a.replaces_worker_name && ` for ${a.replaces_worker_name}`}</span> : '') },
+            can('payroll.view') && { key: 'pay', label: 'Rate', render: (a) => `${fmtMoney(a.pay_rate)}/${a.pay_rate_type === 'hourly' ? 'h' : 'day'}` },
             { key: 'meals', label: 'Meals', render: (a) => a.meals.map(label).join(', ') || 'None' },
             { key: 'status', label: 'Status', type: 'badge' },
             { key: 'act', label: '', render: (a) => can('assignments.manage') && a.status === 'active' && (
@@ -60,26 +76,31 @@ export default function WorkerDetail() {
                 <button className="link" onClick={() => setModal({ meals: a })}>Meals</button>
                 <button className="link" onClick={() => setModal({ end: a })}>End</button>
               </span>) },
-          ]} />
+          ].filter(Boolean)} />
       </Card>
 
       {modal === 'edit' && (
         <Modal title="Edit worker" wide onClose={() => setModal(null)}>
-          <EntityForm fields={WORKER_FIELDS} initial={w} onCancel={() => setModal(null)}
+          <p className="muted small">Greyed-out fields are managed by another role.</p>
+          <EntityForm fields={fields} initial={w} onCancel={() => setModal(null)}
             onSubmit={async (d) => { await api.put(`/workers/${id}`, d); setModal(null); worker.reload(); }} />
         </Modal>
       )}
       {modal === 'assign' && (
         <Modal title="New assignment" onClose={() => setModal(null)}>
           <EntityForm submitLabel="Assign"
-            initial={{ start_date: todayStr(), meals: ['lunch'], end_previous: hasOpen, job_position: w.job_position, pay_rate: w.pay_rate, pay_rate_type: w.pay_rate_type }}
+            initial={{ start_date: todayStr(), meals: ['lunch'], end_previous: hasOpen, job_position: w.job_position, pay_rate: w.pay_rate, pay_rate_type: w.pay_rate_type,
+            }}
             fields={[
               { name: 'site_id', label: 'Site (project and client are filled in automatically)', type: 'select', options: siteOptions, required: true, wide: true },
               { name: 'start_date', label: 'Start date', type: 'date', required: true },
               { name: 'end_date', label: 'End date (leave empty if unknown)', type: 'date' },
               { name: 'job_position', label: 'Job position' },
-              { name: 'pay_rate', label: 'Pay rate', type: 'number' },
-              { name: 'pay_rate_type', label: 'Paid per', type: 'select', options: [{ value: 'daily', label: 'Day' }, { value: 'hourly', label: 'Hour' }] },
+              { name: 'pay_rate', label: 'Pay rate', type: 'number', hidden: !can('payroll.manage') },
+              { name: 'pay_rate_type', label: 'Paid per', type: 'select', options: [{ value: 'daily', label: 'Day' }, { value: 'hourly', label: 'Hour' }], hidden: !can('payroll.manage') },
+              { name: 'replaces_worker_id', label: 'Replacing an absent or sick worker? (optional)', type: 'select', options: workerOptions, wide: true,
+                help: 'The worker being replaced is marked absent' },
+              { name: 'staffing_request_id', label: 'For staffing request (optional)', type: 'select', options: requestOptions, wide: true },
               { name: 'meals', label: 'Meals included', type: 'checkboxes', options: MEAL_OPTS },
               { name: 'end_previous', label: 'End the current assignment the day before', type: 'checkbox', hidden: !hasOpen },
               { name: 'notes', label: 'Notes', wide: true },

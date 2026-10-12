@@ -49,7 +49,8 @@ heroku run npm run seed:demo
 ```
 It adds the example from the requirements (Client A with Projects X and Y, Client B with Project Z, Sites 1–7),
 a central kitchen and a temporary kitchen, 42 workers, 10 days of attendance and sample users for every role
-(all with password `Demo1234!`, e.g. `site1@demo.local`, `catering@demo.local`, `medical@demo.local`).
+(all with password `Demo1234!`): `md@demo.local`, `daf@demo.local`, `recruitment@demo.local`, `site1@demo.local`,
+`chef@demo.local`, `souschef@demo.local`, `transport@demo.local`, `medical@demo.local`, `housing@demo.local`, `hse@demo.local`.
 Do not run it on the real database.
 
 ### Settings (Config Vars)
@@ -85,8 +86,8 @@ npm start                     # open http://localhost:4000
 While changing the website, run `npm run dev` (server) and, in a second window, `cd client && npm run dev`
 (website with instant reload at http://localhost:5173).
 
-**Checks:** `npm test` runs 12 automatic checks of the main rules (offline sync, meal calculation, permissions,
-cost sharing and more). Run it on a fresh database right after `npm run seed:demo`, since it changes the data.
+**Checks:** `npm test` runs 19 automatic checks of the main rules (what each role can and cannot do, offline sync,
+meal calculation, the delivery steps, approvals, cost sharing and more). Run it on a fresh database right after `npm run seed:demo`, since it changes the data.
 
 ---
 
@@ -96,9 +97,11 @@ cost sharing and more). Run it on a fresh database right after `npm run seed:dem
 *assignment* with start and end dates. To move a worker you add a new assignment; the old one is closed
 automatically and **kept forever as history**. Two assignments for the same worker can never overlap.
 
-**Attendance.** Site managers mark each worker Present or Absent, with late arrival, early departure, normal hours,
-overtime and a comment. Each record is tied to worker + project + site + date + assignment. A site manager
-only sees the sites given to them (set under *Users & Settings → Users*). A supervisor then *confirms* the day.
+**Attendance.** Site Administrators mark each worker Present or Absent, with late arrival, early departure, normal hours,
+overtime and a comment. Each record is tied to worker + project + site + date + assignment. A Site Administrator
+only sees the sites given to them (set under *Users & Settings → Users*). Every day they press
+*Submit daily workforce report*. The system records whether it came before the deadline (09:00 by default) and shows
+every site's report under *Attendance → Daily workforce reports*. Meals and payroll only use submitted attendance.
 
 **Working without Internet.**
 - The app stores itself on the device, so it opens even with no connection.
@@ -108,27 +111,46 @@ only sees the sites given to them (set under *Users & Settings → Users*). A su
   If sending fails it tries again, waiting a little longer each time.
 - The server remembers every change ID it has received, so the same change is **never saved twice**.
 - If someone else changed the same record in the meantime, the server does **not** overwrite it. It saves a
-  *conflict* that a supervisor resolves under *Attendance → Offline conflicts*. The server is always the official copy.
+  *conflict* that the Site Administrator resolves under *Attendance → Offline conflicts*. The server is always the official copy.
 - Every change to an attendance record is kept in its history.
 
-**Meals.** Meals needed = worker present (and confirmed) + valid assignment + that meal included in the assignment.
-Catering presses *Calculate meals needed*, then *Create production plans* (one per kitchen and meal, using the
-kitchen each site is assigned to on that date). The kitchen records meals produced and rejected, dispatches to sites;
-the site confirms what it received and how many meals it handed out. *Meal tracking* shows
-Needed → Produced → Dispatched → Received → Handed out → Remaining. The system will not let anyone dispatch or hand out
-more meals than are actually available.
+**Meals.** Meals needed = worker present (in a submitted daily report) + valid assignment + that meal included in the assignment.
+Step by step:
+1. The Catering Director presses *Calculate meals needed*, then *Create production plans* (one per kitchen and meal),
+   and sets the quantity and menu for each plan.
+2. Sous-chefs record meals cooked and portioned.
+3. The Catering Director checks quality and hygiene of each batch. Only approved meals can be sent.
+4. The Catering Director plans each delivery (site, quantity, departure time, vehicle) and validates the quantity.
+5. The transport team records what was loaded, then confirms delivery.
+6. The Site Administrator records the dishes received and how many meals were handed out, and can report a delay or complaint.
+   The Catering Director sees these under *Site feedback* and replies.
+
+*Meal tracking* shows Needed → Produced → Dispatched → Received → Handed out → Remaining. The system will not let anyone
+send or hand out more meals than are actually available.
+
+Sous-chefs and the dishwashing, sealing and transport team also keep a daily log (preparation, handovers, shortages,
+cleaning, damaged equipment, packaging, labels, delays, losses) under *Catering & Kitchen → Kitchen & transport log*.
 
 **Kitchens.** Central or temporary; active, suspended or closed. A temporary kitchen must have a start date,
 planned closing date, project and location, and has its own stock, staff, production and expenses.
 Each site is assigned to a kitchen for a period; changing it keeps the old period as history.
 
-**Costs.** Expenses (food, suppliers, transport, fuel, staff, energy, equipment, other) are shared out to
+**Stock and purchases.** Only the Catering Director changes stock (use, losses, deliveries). Sous-chefs and the
+transport team can see their kitchen's stock and report a shortage or loss. When something must be bought, the
+Catering Director submits a *purchase request*; the DAF approves it. Requests above the major-expense limit
+(1,000,000 by default) can only be approved by the Managing Director. Nobody can approve their own request.
+
+**Costs.** The DAF records invoices, purchase orders and delivery notes and validates them (amounts above the
+major-expense limit need the Managing Director). Changing a validated expense sends it back for validation.
+The DAF also sets budgets for a client, project or kitchen; the system shows how much of each budget has been spent.
+Expenses (food, suppliers, transport, fuel, staff, energy, equipment, other) are shared out to
 Client → Project → Site by: direct (one site), meal count (in proportion to the meals each site needed that month from
 that kitchen), percentage, or manual amounts. The parts always add up exactly to the expense.
 
-**Payroll figures.** From attendance: hourly workers get hours × rate; daily workers get days present × rate.
+**Payroll figures.** From attendance: hourly workers get hours × rate; daily workers get days present × rate,
+plus the worker's daily allowance for each day present.
 Overtime = overtime hours × hourly rate × overtime multiplier (default 1.5; for daily workers the hourly rate is the daily
-rate ÷ 8). Both numbers can be changed under *Users & Settings → Settings*. Results can be downloaded as a spreadsheet.
+rate ÷ 8). Both numbers can be changed by the DAF under *Users & Settings → Settings*. Results can be downloaded as a spreadsheet.
 
 **Accommodation.** Facilities → buildings → rooms with a number of beds. Check-in refuses full or closed rooms and
 workers already checked in elsewhere. Shows total beds → occupied → available, and full history.
@@ -136,16 +158,46 @@ workers already checked in elsewhere. Shows total beds → occupied → availabl
 **Medical.** Only roles with medical permissions can open it (not even HR). Every time a medical record or file is
 opened, it is written to the audit log.
 
-**HSE.** Site managers report incidents for their own sites; client and project are filled in from the site.
+**HSE.** Site Administrators report incidents for their own sites; client and project are filled in from the site.
 Photos/documents can be attached. The HSE manager adds corrective actions with a responsible person and due date,
 and has a dashboard (open/closed, by site, by project, severity, overdue actions, trend over 12 months).
+When an action is done, the Managing Director approves it.
 
-**Roles.** Super Administrator, Management / Director, Human Resources, Site Manager, Catering Department,
-Kitchen Manager, Accommodation Manager, Medical Department, HSE Manager, Accounting / Finance.
-Every role is a list of ticked permissions that can be changed on screen, and new roles can be created.
-Changes apply immediately. The Super Administrator always keeps full access.
+**Recruitment and staffing.** The Recruitment Manager creates job profiles and registers candidates. The candidate's
+ID and qualifications are checked (by the Recruitment Manager or the DAF), then the Recruitment Manager approves the
+selection and turns the candidate into a worker with one click. When a client asks a site for more workers, the Site
+Administrator records the request and forwards it; the Recruitment Manager fills it by assigning workers. To replace an
+absent or sick worker, the Recruitment Manager adds an assignment and picks who is being replaced; that worker is marked
+absent. Each worker shows a deployment status: available, deployed, absent or unassigned.
 
-**Enter once, use everywhere.** Attendance entered by a site manager feeds the dashboard, meals, payroll,
+**Roles.** These follow the *System privileges by role* document:
+
+| Role | Can do | Cannot do |
+|---|---|---|
+| Managing Director (MD / DG) | Everything, including major purchases and expenses, approving HSE corrective actions, users, roles and settings | — |
+| Finance & Administration Director (DAF) | Budgets, payroll (rates, allowances, overtime rule), recording and validating invoices / purchase orders / delivery notes, contracts, CNSS and insurance on worker files, checking candidate documents, approving purchase requests. Sees workers, attendance, catering and stock | Assign or replace workers, edit attendance, change catering production, menus or quantities |
+| Recruitment Manager (RRJ / HR Casual Workers) | Job profiles, candidates, approving selection, worker files, assigning and replacing workers, deployment status, handling staffing requests. Sees attendance | Change pay or finance, edit attendance, catering or meal quantities, approve purchases |
+| Site Administrator (own sites only) | Attendance, daily workforce report, incidents, client staffing requests, dishes received, meals handed out, delay and complaint reports | Assign or replace workers, payroll, production, menus, purchases, stock or kitchen data |
+| Catering Director (DC / Head Chef) | Menus, daily quantities, kitchens, quality and hygiene checks, delivery schedule and quantities, stock use and losses, purchase requests, replying to site feedback. Sees workers, attendance and finance | Assign workers, edit attendance, approve purchases, change finance |
+| Sous-Chef (own kitchen only) | Record meals cooked and portioned, preparation, handovers, shortages, delays and quality issues; report stock problems | Change menus, stock or delivery schedules; HR or finance |
+| Dishwashing, Sealing & Transport Team (own kitchen only) | Record cleaning, damaged equipment, portions, packaging, labels, loading, delivery, delays, losses and damaged packaging; report stock problems | HR, finance, menus, changing stock, attendance |
+
+The document does not mention the medical, accommodation and HSE modules, so three more roles are kept for them:
+**Medical Department**, **Accommodation Manager** and **HSE Manager**.
+
+Every role is a list of ticked permissions. The Managing Director can change them on screen
+(*Users & Settings → Roles & permissions*) and create new roles; changes apply immediately. The Managing Director role
+always keeps full access. Each person sees only the menus and buttons their role allows, and the server refuses
+anything else even if someone tries to go around the screens. Sous-chefs and the transport team must be given their
+kitchen, and Site Administrators their sites, under *Users & Settings → Users*.
+
+**Upgrading from the first version.** Pushing this version to Heroku updates the database by itself: new tables and
+columns are added, the old "Super Administrator" role becomes "Managing Director (MD / DG)", and the old default roles
+(Management / Director, Human Resources, Site Manager, Catering Department, Kitchen Manager, Accounting / Finance) are
+removed if nobody uses them. **Users who still have an old role keep it; give them one of the new roles** under
+*Users & Settings → Users*, then delete the old role.
+
+**Enter once, use everywhere.** Attendance entered by a Site Administrator feeds the dashboard, meals, payroll,
 overtime and cost sharing without being typed again.
 
 ---
@@ -171,6 +223,9 @@ overtime and cost sharing without being typed again.
   Internet, protected by a password. If the client needs the database to be completely private, the database must sit
   in a private network (Heroku Private Spaces, or a private cloud database such as AWS RDS in a private network).
   The app does not need any change for that; only `DATABASE_URL` changes.
+- **Check two settings** under *Users & Settings → Settings*. They were set to a guess: currency **XAF** and time zone
+  **Africa/Douala** (used to check the 09:00 daily report deadline). Change them if the company works elsewhere.
+  The major-expense limit (1,000,000) and the report deadline (09:00) can be changed there too.
 - **Offline use** needs the person to open the Attendance page once while online on that device, so the app and the
   worker list are saved there. It works in Chrome, Edge, Safari and Firefox on phones and computers. On a phone,
   use the browser's "Add to Home screen" to install it like an app.
@@ -194,4 +249,3 @@ client/                 React website
   public/sw.js          Lets the app open without Internet
 Procfile                Tells Heroku how to start the app and update the database
 ```
-# chichi_operation

@@ -58,12 +58,14 @@ function clean(fields, body, { partial }) {
 
 function crud(router, base, opts) {
   const {
-    table, entity = table, fields, view = [], manage = [], search = [], filters = {},
+    table, entity = table, fields: allFields, view = [], manage = [], create = manage, search = [], filters = {},
     orderBy = 't.id DESC', allowDelete = false, scope, select = 't.*', from = `${table} t`,
     beforeWrite, afterWrite, canAccessRow, hidden = [],
   } = opts;
 
   const has = (req, perms) => perms.length === 0 || perms.some((p) => req.user.can(p));
+  // A field with `perm` can only be set by users holding one of those permissions; others leave it unchanged.
+  const fieldsFor = (req) => Object.fromEntries(Object.entries(allFields).filter(([, f]) => !f.perm || f.perm.some((p) => req.user.can(p))));
   const strip = (row) => { hidden.forEach((h) => delete row[h]); return row; };
 
   async function fetchRow(req, id) {
@@ -99,8 +101,8 @@ function crud(router, base, opts) {
   }));
 
   router.post(base, wrap(async (req, res) => {
-    if (!has(req, manage)) throw forbidden();
-    let data = clean(fields, req.body || {}, { partial: false });
+    if (!has(req, create)) throw forbidden();
+    let data = clean(fieldsFor(req), req.body || {}, { partial: false });
     if (beforeWrite) data = (await beforeWrite(data, req, null)) || data;
     if (canAccessRow) await canAccessRow(req, data);
     const cols = Object.keys(data);
@@ -114,7 +116,7 @@ function crud(router, base, opts) {
   router.put(`${base}/:id(\\d+)`, wrap(async (req, res) => {
     if (!has(req, manage)) throw forbidden();
     const existing = await fetchRow(req, req.params.id);
-    let data = clean(fields, req.body || {}, { partial: true });
+    let data = clean(fieldsFor(req), req.body || {}, { partial: true });
     if (beforeWrite) data = (await beforeWrite(data, req, existing)) || data;
     if (canAccessRow) await canAccessRow(req, { ...existing, ...data });
     const cols = Object.keys(data);

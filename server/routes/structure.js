@@ -52,7 +52,7 @@ crud(router, '/projects', {
 });
 
 crud(router, '/sites', {
-  table: 'sites', entity: 'site', view: ['structure.view', 'attendance.record', 'hse.report'], manage: ['structure.manage'],
+  table: 'sites', entity: 'site', view: ['structure.view', 'attendance.view', 'attendance.record', 'hse.report', 'staffing.request', 'meals.receive', 'catering.view', 'finance.view', 'payroll.view'], manage: ['structure.manage'],
   select: 't.*, p.name AS project_name, p.client_id, c.name AS client_name',
   from: 'sites t JOIN projects p ON p.id = t.project_id JOIN clients c ON c.id = p.client_id',
   search: ['t.name', 't.code', 'p.name', 'c.name'], filters: { project_id: 't.project_id', status: 't.status', client_id: 'p.client_id' },

@@ -4,14 +4,17 @@ import { useAuth } from '../lib/auth';
 import { label } from '../lib/format';
 import { Alert, Card, EntityForm, ErrorMsg, Modal, PageHeader, Table, Tabs, useLoad, useOptions } from '../components/ui';
 
+// Same name as on the server: this role always has every permission.
+const FULL_ACCESS_ROLE = 'Managing Director (MD / DG)';
+
 export default function Admin() {
   const { can } = useAuth();
   const tabs = [can('users.manage') && { key: 'users', label: 'Users' }, can('users.manage') && { key: 'roles', label: 'Roles & permissions' },
-    can('users.manage') && { key: 'settings', label: 'Settings' }, can('audit.view') && { key: 'audit', label: 'Audit log' }].filter(Boolean);
+    can('settings.manage', 'payroll.manage') && { key: 'settings', label: 'Settings' }, can('audit.view') && { key: 'audit', label: 'Audit log' }].filter(Boolean);
   const [tab, setTab] = useState(tabs[0] ? tabs[0].key : 'audit');
   return (
     <div>
-      <PageHeader title="Users & settings" />
+      <PageHeader title={can('users.manage') ? 'Users & settings' : 'Settings'} />
       <Tabs tabs={tabs} value={tab} onChange={setTab} />
       {tab === 'users' && <Users />}
       {tab === 'roles' && <Roles />}
@@ -33,8 +36,8 @@ function Users() {
     { name: 'role_id', label: 'Role', type: 'select', options: roles, required: true },
     { name: 'password', label: editing && editing.id ? 'New password (leave empty to keep)' : 'Password (at least 8 characters)', type: 'password', required: !(editing && editing.id) },
     { name: 'active', label: 'Account active', type: 'checkbox' },
-    { name: 'site_ids', label: 'Sites this user is responsible for (needed for site managers)', type: 'checkboxes', options: sites, wide: true },
-    { name: 'kitchen_ids', label: 'Kitchens this user manages (needed for kitchen managers)', type: 'checkboxes', options: kitchens, wide: true },
+    { name: 'site_ids', label: 'Sites this user works on (needed for Site Administrators)', type: 'checkboxes', options: sites, wide: true },
+    { name: 'kitchen_ids', label: 'Kitchens this user works in (needed for Sous-Chefs and the Dishwashing, Sealing & Transport Team)', type: 'checkboxes', options: kitchens, wide: true },
   ];
   return (
     <div>
@@ -69,7 +72,7 @@ function Roles() {
   const save = async () => {
     setError(null);
     try {
-      if (editing.id) await api.put(`/roles/${editing.id}`, { name: editing.name, description: editing.description, permissions: editing.name === 'Super Administrator' ? undefined : editing.permissions });
+      if (editing.id) await api.put(`/roles/${editing.id}`, { name: editing.name, description: editing.description, permissions: editing.name === FULL_ACCESS_ROLE ? undefined : editing.permissions });
       else await api.post('/roles', editing);
       setSaved(`Role "${editing.name}" saved. Changes apply immediately.`);
       setEditing(null); roles.reload();
@@ -88,23 +91,23 @@ function Roles() {
         <Modal title={editing.id ? `Role: ${editing.name}` : 'New role'} wide onClose={() => setEditing(null)}>
           <ErrorMsg error={error} />
           <div className="form-grid">
-            <div className="field"><label htmlFor="rname">Name</label><input id="rname" value={editing.name} disabled={editing.name === 'Super Administrator'} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></div>
+            <div className="field"><label htmlFor="rname">Name</label><input id="rname" value={editing.name} disabled={editing.name === FULL_ACCESS_ROLE} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></div>
             <div className="field"><label htmlFor="rdesc">Description</label><input id="rdesc" value={editing.description || ''} onChange={(e) => setEditing({ ...editing, description: e.target.value })} /></div>
           </div>
-          {editing.name === 'Super Administrator' && <Alert tone="info">This role always has every permission.</Alert>}
+          {editing.name === FULL_ACCESS_ROLE && <Alert tone="info">This role always has every permission.</Alert>}
           {modules.map((m) => (
             <fieldset key={m} className="perm-group">
               <legend>{m}</legend>
               {perms.data.filter((p) => p.module === m).map((p) => (
                 <label key={p.code} className="check perm">
-                  <input type="checkbox" checked={editing.permissions.includes(p.code)} disabled={editing.name === 'Super Administrator'} onChange={() => toggle(p.code)} />
+                  <input type="checkbox" checked={editing.permissions.includes(p.code)} disabled={editing.name === FULL_ACCESS_ROLE} onChange={() => toggle(p.code)} />
                   {p.description}
                 </label>
               ))}
             </fieldset>
           ))}
           <div className="form-actions">
-            {editing.id && !editing.user_count && editing.name !== 'Super Administrator' && (
+            {editing.id && !editing.user_count && editing.name !== FULL_ACCESS_ROLE && (
               <button className="btn btn-danger-ghost" onClick={async () => { if (window.confirm('Delete this role?')) { try { await api.del(`/roles/${editing.id}`); setEditing(null); roles.reload(); } catch (e) { setError(e); } } }}>Delete role</button>
             )}
             <div className="spacer" />
@@ -117,6 +120,7 @@ function Roles() {
 }
 
 function Settings() {
+  const { can } = useAuth();
   const s = useLoad(() => api.get('/settings'), []);
   const [saved, setSaved] = useState(false);
   if (!s.data) return <ErrorMsg error={s.error} />;
@@ -124,7 +128,7 @@ function Settings() {
     <Card>
       {saved && <Alert tone="success">Settings saved.</Alert>}
       <EntityForm initial={Object.fromEntries(s.data.map((x) => [x.setting_key, x.setting_value]))}
-        fields={s.data.map((x) => ({ name: x.setting_key, label: label(x.setting_key), help: x.description, required: true }))}
+        fields={s.data.map((x) => ({ name: x.setting_key, label: label(x.setting_key), help: x.description, required: true, readOnly: !can(x.edit_permission) }))}
         onSubmit={async (d) => { await api.put('/settings', d); setSaved(true); }} />
     </Card>
   );

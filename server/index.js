@@ -37,7 +37,7 @@ app.use('/api/auth', require('./routes/auth'));
 const api = express.Router();
 api.use(authenticate);
 api.use('/structure', require('./routes/structure'));
-for (const r of ['workers', 'attendance', 'catering', 'finance', 'accommodation', 'medical', 'hse', 'payroll', 'dashboard', 'admin']) {
+for (const r of ['workers', 'recruitment', 'staffing', 'attendance', 'catering', 'operations', 'purchases', 'finance', 'accommodation', 'medical', 'hse', 'payroll', 'dashboard', 'admin']) {
   api.use(require(`./routes/${r}`));
 }
 app.use('/api', api);

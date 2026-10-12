@@ -49,13 +49,14 @@ export default function Attendance() {
   const tab = params.get('tab') || 'register';
   const tabs = [{ key: 'register', label: 'Daily register' }];
   if (can('attendance.validate')) tabs.push({ key: 'conflicts', label: 'Offline conflicts' });
-  if (can('attendance.view')) tabs.push({ key: 'report', label: 'Attendance report' });
+  if (can('attendance.view')) tabs.push({ key: 'daily', label: 'Daily workforce reports' }, { key: 'report', label: 'Attendance report' });
   return (
     <div>
       <PageHeader title="Attendance" subtitle="Record who is present each day. Works offline — changes are sent automatically." />
       <Tabs tabs={tabs} value={tab} onChange={(t) => setParams({ tab: t })} />
       {tab === 'register' && <Register />}
       {tab === 'conflicts' && <Conflicts />}
+      {tab === 'daily' && <DailyReports />}
       {tab === 'report' && <Report />}
     </div>
   );
@@ -74,6 +75,10 @@ function Register() {
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
   const canRecord = can('attendance.record', 'attendance.validate');
+  const [deadline, setDeadline] = useState('09:00');
+  useEffect(() => {
+    api.get('/settings').then((rows) => { const d = rows.find((x) => x.setting_key === 'daily_report_deadline'); if (d) setDeadline(d.setting_value); }).catch(() => {});
+  }, []);
 
   useEffect(() => subscribe(setSync), []);
   useEffect(() => {
@@ -151,10 +156,11 @@ function Register() {
   };
 
   const validateDay = async () => {
-    if (!window.confirm('Confirm attendance for this site and day? Catering and payroll use confirmed attendance.')) return;
+    if (!window.confirm('Submit the daily workforce report for this site and day? Catering and payroll use submitted attendance.')) return;
     try {
       const r = await api.post('/attendance/validate', { site_id: siteId, date });
-      setMessage(`${r.validated} record(s) confirmed.`);
+      setMessage(`Daily report submitted: ${r.report.present_count} present, ${r.report.absent_count} absent, ${r.report.overtime_hours} overtime hours.`
+        + (Number(r.report.on_time) ? '' : ` Submitted after the ${r.deadline} deadline.`));
       reload();
     } catch (e) { setError(e); }
   };
@@ -218,7 +224,7 @@ function Register() {
                 <strong>{r.worker_name}</strong>
                 <span className="muted small">{r.worker_code} · {r.job_position || ''} · meals: {r.meals.map(label).join(', ') || 'none'}</span>
                 <span>
-                  {Number(r.validated) ? <Badge value="confirmed" tone="green" /> : null}
+                  {Number(r.validated) ? <Badge value="reported" tone="green" /> : null}
                   {isPending && <Badge value={pendingByAsg[r.assignment_id].state === 'failed' ? 'not accepted' : 'waiting to send'} tone={pendingByAsg[r.assignment_id].state === 'failed' ? 'red' : 'orange'} />}
                 </span>
               </div>
@@ -242,8 +248,8 @@ function Register() {
 
       {can('attendance.validate') && roster && roster.length > 0 && (
         <div className="form-actions">
-          <span className="muted">{notValidated} record(s) not yet confirmed</span>
-          <button className="btn btn-ghost" onClick={validateDay} disabled={!sync.online || waitingHere > 0 || editCount > 0 || !notValidated}>Confirm attendance for this day</button>
+          <span className="muted">{notValidated ? `${notValidated} record(s) not in a submitted report yet. ` : ''}Submit the report every day before {deadline}.</span>
+          <button className="btn" onClick={validateDay} disabled={!sync.online || waitingHere > 0 || editCount > 0 || !recorded}>Submit daily workforce report</button>
         </div>
       )}
     </div>
@@ -276,6 +282,25 @@ function Conflicts() {
   );
 }
 
+function DailyReports() {
+  const [date, setDate] = useState(todayStr());
+  const list = useLoad(() => api.get(`/attendance/daily-reports${qs({ date })}`), [date]);
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="field"><label htmlFor="drdate">Date</label><input id="drdate" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+        <p className="muted">One report per site per day, submitted by the Site Administrator before the deadline (see Settings).</p>
+      </div>
+      <ErrorMsg error={list.error} />
+      <Table rows={list.data} rowKey={(r) => r.site_id} empty="No active sites."
+        columns={[{ key: 'project_name', label: 'Project' }, { key: 'site_name', label: 'Site' },
+          { key: 'state', label: 'Report', render: (r) => (!r.id ? <Badge value="missing" tone="red" /> : <Badge value={Number(r.on_time) ? 'on_time' : 'late'} />) },
+          { key: 'present_count', label: 'Present', num: true }, { key: 'absent_count', label: 'Absent', num: true }, { key: 'overtime_hours', label: 'Overtime (h)', num: true },
+          { key: 'submitted_at', label: 'Submitted', type: 'datetime' }, { key: 'submitted_by_name', label: 'By' }, { key: 'notes', label: 'Notes' }]} />
+    </div>
+  );
+}
+
 function Report() {
   const [from, setFrom] = useState(todayStr().slice(0, 8) + '01');
   const [to, setTo] = useState(todayStr());
@@ -291,7 +316,7 @@ function Report() {
         { key: 'work_date', label: 'Date', type: 'date' }, { key: 'worker_name', label: 'Worker' }, { key: 'site_name', label: 'Site' }, { key: 'project_name', label: 'Project' },
         { key: 'status', label: 'Status', type: 'badge' }, { key: 'late_arrival', label: 'Late', type: 'bool' }, { key: 'early_departure', label: 'Left early', type: 'bool' },
         { key: 'normal_hours', label: 'Hours', num: true }, { key: 'overtime_hours', label: 'Overtime', num: true },
-        { key: 'validated', label: 'Confirmed', type: 'bool' }, { key: 'source', label: 'Entered', type: 'label' }, { key: 'comments', label: 'Comment' },
+        { key: 'validated', label: 'In daily report', type: 'bool' }, { key: 'source', label: 'Entered', type: 'label' }, { key: 'comments', label: 'Comment' },
       ]} />
     </div>
   );

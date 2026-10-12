@@ -13,7 +13,7 @@ const dayBefore = (d) => { const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.
 
 // ---------- Kitchens ----------
 crud(router, '/kitchens', {
-  table: 'kitchens', entity: 'kitchen', view: ['catering.view', 'finance.view'], manage: ['catering.manage'],
+  table: 'kitchens', entity: 'kitchen', view: ['catering.view', 'finance.view', 'kitchen.view', 'stock.view', 'stock.report', 'purchases.request'], manage: ['catering.manage'],
   select: 't.*, p.name AS project_name',
   from: 'kitchens t LEFT JOIN projects p ON p.id = t.project_id',
   filters: { status: 't.status', kitchen_type: 't.kitchen_type' }, search: ['t.name', 't.location'], orderBy: 't.kitchen_type, t.name',
@@ -86,7 +86,7 @@ const kitchenScoped = (u) => kitchenFilter(u, 't.kitchen_id');
 const checkKitchen = async (req, row) => assertKitchen(req.user, row.kitchen_id);
 
 crud(router, '/kitchen-staff', {
-  table: 'kitchen_staff', entity: 'kitchen_staff', view: ['catering.view'], manage: ['kitchen.manage', 'catering.manage'],
+  table: 'kitchen_staff', entity: 'kitchen_staff', view: ['catering.view', 'kitchen.view'], manage: ['catering.manage'],
   select: 't.*, k.name AS kitchen_name', from: 'kitchen_staff t JOIN kitchens k ON k.id = t.kitchen_id',
   filters: { kitchen_id: 't.kitchen_id' }, orderBy: 'k.name, t.name', scope: kitchenScoped, canAccessRow: checkKitchen, allowDelete: true,
   fields: {
@@ -100,7 +100,8 @@ crud(router, '/kitchen-staff', {
 });
 
 crud(router, '/stock-items', {
-  table: 'stock_items', entity: 'stock_item', view: ['catering.view'], manage: ['kitchen.manage', 'catering.manage'],
+  // Catering Director records stock; sous-chefs and the transport team can only see levels and report (see /operations/logs)
+  table: 'stock_items', entity: 'stock_item', view: ['stock.view', 'stock.report'], manage: ['stock.manage'],
   select: 't.*, k.name AS kitchen_name, t.quantity <= t.reorder_level AS low_stock', from: 'stock_items t JOIN kitchens k ON k.id = t.kitchen_id',
   filters: { kitchen_id: 't.kitchen_id' }, search: ['t.name'], orderBy: 'k.name, t.name', scope: kitchenScoped, canAccessRow: checkKitchen,
   fields: {
@@ -111,7 +112,7 @@ crud(router, '/stock-items', {
   },
 });
 
-router.get('/stock-items/:id(\\d+)/movements', requirePerm('catering.view'), wrap(async (req, res) => {
+router.get('/stock-items/:id(\\d+)/movements', requirePerm('stock.view'), wrap(async (req, res) => {
   const item = await db.one('SELECT kitchen_id FROM stock_items WHERE id = ?', [req.params.id]);
   if (!item) throw notFound('Stock item');
   assertKitchen(req.user, item.kitchen_id);
@@ -120,7 +121,7 @@ router.get('/stock-items/:id(\\d+)/movements', requirePerm('catering.view'), wra
 }));
 
 // in = received, out = used, waste = thrown away, adjustment = stock count correction (+ or -)
-router.post('/stock-items/:id(\\d+)/movements', requirePerm('kitchen.manage', 'catering.manage'), wrap(async (req, res) => {
+router.post('/stock-items/:id(\\d+)/movements', requirePerm('stock.manage'), wrap(async (req, res) => {
   const { movement_type: type, quantity, movement_date: date, reference, notes } = req.body || {};
   if (!['in', 'out', 'waste', 'adjustment'].includes(type)) throw bad('Movement type must be in, out, waste or adjustment');
   const qty = Number(quantity);
@@ -226,15 +227,17 @@ async function plansFor(user, { date, kitchenId }) {
   const where = ['mp.service_date = ?', k.sql]; const params = [date, ...k.params];
   if (kitchenId) { where.push('mp.kitchen_id = ?'); params.push(kitchenId); }
   return db.query(
-    `SELECT mp.*, k.name AS kitchen_name, k.kitchen_type,
+    `SELECT mp.*, k.name AS kitchen_name, k.kitchen_type, mn.name AS menu_name, mn.dishes AS menu_dishes,
             COALESCE((SELECT SUM(produced_qty) FROM production_batches b WHERE b.meal_plan_id = mp.id), 0) AS produced_qty,
-            COALESCE((SELECT SUM(rejected_qty) FROM production_batches b WHERE b.meal_plan_id = mp.id), 0) AS rejected_qty,
-            COALESCE((SELECT SUM(dispatched_qty) FROM dispatches d WHERE d.meal_plan_id = mp.id), 0) AS dispatched_qty
-       FROM meal_plans mp JOIN kitchens k ON k.id = mp.kitchen_id
+            COALESCE((SELECT SUM(IF(quality_status = 'rejected', produced_qty, rejected_qty)) FROM production_batches b WHERE b.meal_plan_id = mp.id), 0) AS rejected_qty,
+            COALESCE((SELECT SUM(produced_qty - rejected_qty) FROM production_batches b WHERE b.meal_plan_id = mp.id AND quality_status = 'approved'), 0) AS approved_qty,
+            COALESCE((SELECT SUM(produced_qty - rejected_qty) FROM production_batches b WHERE b.meal_plan_id = mp.id AND quality_status = 'pending'), 0) AS awaiting_check_qty,
+            COALESCE((SELECT SUM(dispatched_qty) FROM dispatches d WHERE d.meal_plan_id = mp.id AND d.status <> 'cancelled'), 0) AS dispatched_qty
+       FROM meal_plans mp JOIN kitchens k ON k.id = mp.kitchen_id LEFT JOIN menus mn ON mn.id = mp.menu_id
       WHERE ${where.join(' AND ')} ORDER BY k.name, mp.meal_type`, params);
 }
 
-router.get('/catering/plans', requirePerm('catering.view'), wrap(async (req, res) => {
+router.get('/catering/plans', requirePerm('catering.view', 'kitchen.view'), wrap(async (req, res) => {
   const date = isDate(req.query.date) ? req.query.date : today();
   res.json(await plansFor(req.user, { date, kitchenId: req.query.kitchen_id }));
 }));
@@ -246,27 +249,36 @@ async function getPlan(req, id) {
   return plan;
 }
 
-router.put('/catering/plans/:id(\\d+)', requirePerm('kitchen.manage', 'catering.manage'), wrap(async (req, res) => {
+// Daily meal quantities and the menu are planned by the Catering Director (catering.manage)
+router.put('/catering/plans/:id(\\d+)', requirePerm('catering.manage'), wrap(async (req, res) => {
   const plan = await getPlan(req, req.params.id);
   const b = req.body || {};
   const planned = b.planned_qty === undefined ? plan.planned_qty : Number(b.planned_qty);
   if (!Number.isInteger(planned) || planned < 0) throw bad('Planned quantity must be a whole number');
   const status = b.status || plan.status;
   if (!['draft', 'confirmed', 'in_production', 'completed'].includes(status)) throw bad('Invalid status');
-  await db.query('UPDATE meal_plans SET planned_qty = ?, menu = ?, status = ? WHERE id = ?', [planned, b.menu ?? plan.menu, status, plan.id]);
-  await audit(req, 'update', 'meal_plan', plan.id, { planned_qty: planned, status, menu: b.menu });
+  let menuId = b.menu_id === undefined ? plan.menu_id : (b.menu_id ? Number(b.menu_id) : null);
+  if (menuId) {
+    const m = await db.one('SELECT meal_type FROM menus WHERE id = ?', [menuId]);
+    if (!m) throw bad('Menu not found');
+    if (m.meal_type !== plan.meal_type) throw bad(`This menu is for ${m.meal_type}, not ${plan.meal_type}`);
+  } else menuId = null;
+  await db.query('UPDATE meal_plans SET planned_qty = ?, menu_id = ?, menu = ?, status = ? WHERE id = ?', [planned, menuId, b.menu ?? plan.menu, status, plan.id]);
+  await audit(req, 'update', 'meal_plan', plan.id, { planned_qty: planned, status, menu_id: menuId, menu: b.menu });
   res.json(await db.one('SELECT * FROM meal_plans WHERE id = ?', [plan.id]));
 }));
 
-router.get('/catering/plans/:id(\\d+)/batches', requirePerm('catering.view'), wrap(async (req, res) => {
+router.get('/catering/plans/:id(\\d+)/batches', requirePerm('catering.view', 'kitchen.view'), wrap(async (req, res) => {
   await getPlan(req, req.params.id);
-  res.json(await db.query('SELECT * FROM production_batches WHERE meal_plan_id = ? ORDER BY produced_at', [req.params.id]));
+  res.json(await db.query(`SELECT b.*, u.name AS recorded_by_name, q.name AS checked_by_name FROM production_batches b
+    LEFT JOIN users u ON u.id = b.recorded_by LEFT JOIN users q ON q.id = b.quality_checked_by WHERE b.meal_plan_id = ? ORDER BY b.produced_at`, [req.params.id]));
 }));
 
-router.post('/catering/plans/:id(\\d+)/batches', requirePerm('kitchen.manage'), wrap(async (req, res) => {
+// Sous-chefs record meals cooked and portioned
+router.post('/catering/plans/:id(\\d+)/batches', requirePerm('kitchen.produce'), wrap(async (req, res) => {
   const plan = await getPlan(req, req.params.id);
   const produced = Number(req.body.produced_qty || 0); const rejected = Number(req.body.rejected_qty || 0);
-  if (!Number.isInteger(produced) || !Number.isInteger(rejected) || produced < 0 || rejected < 0) throw bad('Quantities must be whole numbers');
+  if (!Number.isInteger(produced) || !Number.isInteger(rejected) || produced <= 0 || rejected < 0) throw bad('Enter the number of meals cooked (whole number above 0)');
   if (rejected > produced) throw bad('Rejected/wasted cannot be more than produced');
   const r = await db.query('INSERT INTO production_batches (meal_plan_id, produced_qty, rejected_qty, produced_at, notes, recorded_by) VALUES (?,?,?,NOW(),?,?)',
     [plan.id, produced, rejected, req.body.notes || null, req.user.id]);
@@ -275,56 +287,175 @@ router.post('/catering/plans/:id(\\d+)/batches', requirePerm('kitchen.manage'), 
   res.status(201).json({ id: r.insertId });
 }));
 
-// ---------- Dispatch, receipt, distribution ----------
+// Catering Director validates quality and hygiene. Only approved meals can be dispatched.
+router.post('/catering/batches/:id(\\d+)/quality', requirePerm('quality.validate'), wrap(async (req, res) => {
+  const b = await db.one('SELECT * FROM production_batches WHERE id = ?', [req.params.id]);
+  if (!b) throw notFound('Production batch');
+  await getPlan(req, b.meal_plan_id);
+  const status = req.body.quality_status;
+  if (!['approved', 'rejected'].includes(status)) throw bad('Choose approved or rejected');
+  const rejected = req.body.rejected_qty === undefined || req.body.rejected_qty === '' ? b.rejected_qty : Number(req.body.rejected_qty);
+  if (!Number.isInteger(rejected) || rejected < 0 || rejected > b.produced_qty) throw bad(`Rejected meals must be between 0 and ${b.produced_qty}`);
+  if (status === 'rejected' && b.quality_status === 'approved') {
+    const plan = (await plansFor(req.user, { date: (await db.one('SELECT service_date FROM meal_plans WHERE id = ?', [b.meal_plan_id])).service_date })).find((p) => p.id === b.meal_plan_id);
+    const goodAfter = Number(plan.approved_qty) - (b.produced_qty - b.rejected_qty);
+    if (goodAfter < Number(plan.dispatched_qty)) throw bad('Meals from this batch have already been validated for dispatch');
+  }
+  await db.query('UPDATE production_batches SET quality_status = ?, rejected_qty = ?, quality_notes = ?, quality_checked_by = ?, quality_checked_at = NOW() WHERE id = ?',
+    [status, rejected, req.body.quality_notes || null, req.user.id, b.id]);
+  await audit(req, 'quality_' + status, 'production_batch', b.id, { rejected_qty: rejected, notes: req.body.quality_notes });
+  res.json({ ok: true });
+}));
+
+// Sites served by the user's kitchens today (for labelling and deliveries by kitchen staff)
+router.get('/catering/kitchen-sites', requirePerm('catering.view', 'kitchen.view'), wrap(async (req, res) => {
+  const k = kitchenFilter(req.user, 'ska.kitchen_id');
+  res.json(await db.query(
+    `SELECT DISTINCT s.id, s.name, ska.kitchen_id, k.name AS kitchen_name FROM site_kitchen_assignments ska
+       JOIN sites s ON s.id = ska.site_id JOIN kitchens k ON k.id = ska.kitchen_id
+      WHERE ska.start_date <= CURDATE() AND (ska.end_date IS NULL OR ska.end_date >= CURDATE()) AND ${k.sql} ORDER BY k.name, s.name`, k.params));
+}));
+
+// ---------- Menus ----------
+crud(router, '/menus', {
+  table: 'menus', entity: 'menu', view: ['catering.view', 'kitchen.view'], manage: ['menus.manage'],
+  filters: { meal_type: 't.meal_type', active: 't.active' }, search: ['t.name', 't.dishes'], orderBy: 't.active DESC, t.meal_type, t.name',
+  fields: {
+    name: { type: 'string', required: true, max: 120, label: 'Menu name' },
+    meal_type: { type: 'enum', required: true, values: MEALS, label: 'Meal' },
+    dishes: { type: 'string', max: 2000 },
+    active: { type: 'bool', default: 1 },
+  },
+});
+
+// ---------- Delivery: planned -> validated -> loaded -> delivered -> received ----------
 function dispatchScope(user) {
-  // Kitchen managers limited to their kitchens see their dispatches; everyone else is limited by site.
-  if (user.can('kitchen.manage') && user.kitchenIds !== null) return kitchenFilter(user, 'd.kitchen_id');
-  return siteFilter(user, 'd.site_id');
+  if (user.can('catering.view')) return siteFilter(user, 'd.site_id');
+  if (user.can('kitchen.view')) return kitchenFilter(user, 'd.kitchen_id'); // kitchen and transport staff: own kitchen
+  return siteFilter(user, 'd.site_id'); // site administrators: own sites
 }
 
-router.get('/catering/dispatches', requirePerm('catering.view', 'meals.receive'), wrap(async (req, res) => {
+const DISPATCH_SELECT = `SELECT d.*, k.name AS kitchen_name, s.name AS site_name, del.received_qty, del.received_at, del.condition_notes
+  FROM dispatches d JOIN kitchens k ON k.id = d.kitchen_id JOIN sites s ON s.id = d.site_id
+  LEFT JOIN deliveries del ON del.dispatch_id = d.id`;
+
+router.get('/catering/dispatches', requirePerm('catering.view', 'kitchen.view', 'meals.receive'), wrap(async (req, res) => {
   const s = dispatchScope(req.user);
   const where = [s.sql]; const params = [...s.params];
   if (isDate(req.query.date)) { where.push('d.service_date = ?'); params.push(req.query.date); }
-  for (const k of ['site_id', 'kitchen_id']) if (req.query[k]) { where.push(`d.${k} = ?`); params.push(req.query[k]); }
-  res.json(await db.query(
-    `SELECT d.*, k.name AS kitchen_name, s.name AS site_name, del.received_qty, del.received_at, del.condition_notes
-       FROM dispatches d JOIN kitchens k ON k.id = d.kitchen_id JOIN sites s ON s.id = d.site_id
-       LEFT JOIN deliveries del ON del.dispatch_id = d.id
-      WHERE ${where.join(' AND ')} ORDER BY d.service_date DESC, k.name, s.name LIMIT 1000`, params));
+  for (const k of ['site_id', 'kitchen_id', 'status']) if (req.query[k]) { where.push(`d.${k} = ?`); params.push(req.query[k]); }
+  res.json(await db.query(`${DISPATCH_SELECT} WHERE ${where.join(' AND ')} ORDER BY d.service_date DESC, d.planned_departure, k.name, s.name LIMIT 1000`, params));
 }));
 
-router.post('/catering/dispatches', requirePerm('kitchen.manage'), wrap(async (req, res) => {
+const toDateTime = (v) => {
+  if (!v) return null;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) throw bad('Invalid departure time');
+  return d.toISOString().slice(0, 19).replace('T', ' ');
+};
+
+// Catering Director plans the delivery schedule
+router.post('/catering/dispatches', requirePerm('dispatch.plan'), wrap(async (req, res) => {
   const b = req.body || {};
-  const qty = Number(b.dispatched_qty);
-  if (!b.meal_plan_id || !b.site_id || !Number.isInteger(qty) || qty <= 0) throw bad('Meal plan, site and a quantity above 0 are required');
-  const id = await db.tx(async (conn) => {
-    const [[plan]] = await conn.query('SELECT * FROM meal_plans WHERE id = ? FOR UPDATE', [b.meal_plan_id]);
-    if (!plan) throw notFound('Meal plan');
-    assertKitchen(req.user, plan.kitchen_id);
-    const [[t]] = await conn.query(
-      `SELECT COALESCE((SELECT SUM(produced_qty - rejected_qty) FROM production_batches WHERE meal_plan_id = ?), 0) AS good,
-              COALESCE((SELECT SUM(dispatched_qty) FROM dispatches WHERE meal_plan_id = ?), 0) AS sent`, [plan.id, plan.id]);
-    const available = Number(t.good) - Number(t.sent);
-    if (qty > available) throw bad(`Only ${available} good meals are available to dispatch for this plan`);
-    const [r] = await conn.query(
-      `INSERT INTO dispatches (meal_plan_id, kitchen_id, site_id, service_date, meal_type, dispatched_qty, status, vehicle, driver, dispatched_at, notes, recorded_by)
-       VALUES (?,?,?,?,?,?, 'dispatched', ?,?, NOW(), ?, ?)`,
-      [plan.id, plan.kitchen_id, b.site_id, plan.service_date, plan.meal_type, qty, b.vehicle || null, b.driver || null, b.notes || null, req.user.id]);
-    await audit(req, 'create', 'dispatch', r.insertId, { meal_plan_id: plan.id, site_id: b.site_id, qty }, conn);
-    return r.insertId;
-  });
-  res.status(201).json({ id });
+  const qty = Number(b.planned_qty);
+  if (!b.meal_plan_id || !b.site_id || !Number.isInteger(qty) || qty <= 0) throw bad('Meal plan, site and a planned quantity above 0 are required');
+  const plan = await getPlan(req, b.meal_plan_id);
+  const r = await db.query(
+    `INSERT INTO dispatches (meal_plan_id, kitchen_id, site_id, service_date, meal_type, planned_qty, planned_departure, status, vehicle, driver, notes, recorded_by)
+     VALUES (?,?,?,?,?,?,?, 'planned', ?,?,?,?)`,
+    [plan.id, plan.kitchen_id, b.site_id, plan.service_date, plan.meal_type, qty, toDateTime(b.planned_departure), b.vehicle || null, b.driver || null, b.notes || null, req.user.id]);
+  await audit(req, 'plan', 'dispatch', r.insertId, { meal_plan_id: plan.id, site_id: b.site_id, planned_qty: qty });
+  res.status(201).json({ id: r.insertId });
 }));
 
+async function getDispatch(conn, req, id) {
+  const [[d]] = await conn.query('SELECT * FROM dispatches WHERE id = ? FOR UPDATE', [id]);
+  if (!d) throw notFound('Dispatch');
+  return d;
+}
+
+router.put('/catering/dispatches/:id(\\d+)', requirePerm('dispatch.plan'), wrap(async (req, res) => {
+  await db.tx(async (conn) => {
+    const d = await getDispatch(conn, req, req.params.id);
+    assertKitchen(req.user, d.kitchen_id);
+    if (!['planned', 'validated'].includes(d.status)) throw bad('This delivery has already left and can no longer be changed');
+    const b = req.body || {};
+    const qty = b.planned_qty === undefined ? d.planned_qty : Number(b.planned_qty);
+    if (!Number.isInteger(qty) || qty <= 0) throw bad('Planned quantity must be above 0');
+    await conn.query('UPDATE dispatches SET planned_qty = ?, planned_departure = ?, vehicle = ?, driver = ?, notes = ? WHERE id = ?',
+      [qty, b.planned_departure === undefined ? d.planned_departure : toDateTime(b.planned_departure), b.vehicle ?? d.vehicle, b.driver ?? d.driver, b.notes ?? d.notes, d.id]);
+    await audit(req, 'update', 'dispatch', d.id, b, conn);
+  });
+  res.json({ ok: true });
+}));
+
+// Catering Director validates the quantity to send (only quality-approved meals can be sent)
+router.post('/catering/dispatches/:id(\\d+)/validate', requirePerm('dispatch.plan'), wrap(async (req, res) => {
+  await db.tx(async (conn) => {
+    const d = await getDispatch(conn, req, req.params.id);
+    assertKitchen(req.user, d.kitchen_id);
+    if (!['planned', 'validated'].includes(d.status)) throw bad('This delivery has already been loaded');
+    const qty = req.body.dispatched_qty === undefined ? d.planned_qty : Number(req.body.dispatched_qty);
+    if (!Number.isInteger(qty) || qty <= 0) throw bad('Quantity must be above 0');
+    await conn.query('SELECT id FROM meal_plans WHERE id = ? FOR UPDATE', [d.meal_plan_id]);
+    const [[t]] = await conn.query(
+      `SELECT COALESCE((SELECT SUM(produced_qty - rejected_qty) FROM production_batches WHERE meal_plan_id = ? AND quality_status = 'approved'), 0) AS good,
+              COALESCE((SELECT SUM(dispatched_qty) FROM dispatches WHERE meal_plan_id = ? AND id <> ? AND status <> 'cancelled'), 0) AS sent`,
+      [d.meal_plan_id, d.meal_plan_id, d.id]);
+    const available = Number(t.good) - Number(t.sent);
+    if (qty > available) throw bad(`Only ${available} quality-approved meals are available for this plan`);
+    await conn.query("UPDATE dispatches SET dispatched_qty = ?, status = 'validated', validated_by = ?, validated_at = NOW() WHERE id = ?", [qty, req.user.id, d.id]);
+    await audit(req, 'validate', 'dispatch', d.id, { dispatched_qty: qty }, conn);
+  });
+  res.json({ ok: true });
+}));
+
+router.post('/catering/dispatches/:id(\\d+)/cancel', requirePerm('dispatch.plan'), wrap(async (req, res) => {
+  await db.tx(async (conn) => {
+    const d = await getDispatch(conn, req, req.params.id);
+    assertKitchen(req.user, d.kitchen_id);
+    if (!['planned', 'validated'].includes(d.status)) throw bad('This delivery has already been loaded');
+    await conn.query("UPDATE dispatches SET status = 'cancelled' WHERE id = ?", [d.id]);
+    await audit(req, 'cancel', 'dispatch', d.id, null, conn);
+  });
+  res.json({ ok: true });
+}));
+
+// Transport team records what was loaded into the vehicle
+router.post('/catering/dispatches/:id(\\d+)/load', requirePerm('delivery.execute'), wrap(async (req, res) => {
+  await db.tx(async (conn) => {
+    const d = await getDispatch(conn, req, req.params.id);
+    assertKitchen(req.user, d.kitchen_id);
+    if (d.status !== 'validated') throw bad(d.status === 'planned' ? 'The Catering Director has not validated this quantity yet' : 'This delivery has already been loaded');
+    const qty = Number(req.body.loaded_qty);
+    if (!Number.isInteger(qty) || qty < 0 || qty > d.dispatched_qty) throw bad(`Loaded quantity must be between 0 and ${d.dispatched_qty}`);
+    await conn.query("UPDATE dispatches SET loaded_qty = ?, status = 'loaded', loaded_by = ?, loaded_at = NOW(), dispatched_at = NOW() WHERE id = ?", [qty, req.user.id, d.id]);
+    await audit(req, 'load', 'dispatch', d.id, { loaded_qty: qty }, conn);
+  });
+  res.json({ ok: true });
+}));
+
+// Transport team confirms the meals were handed over at the site
+router.post('/catering/dispatches/:id(\\d+)/deliver', requirePerm('delivery.execute'), wrap(async (req, res) => {
+  await db.tx(async (conn) => {
+    const d = await getDispatch(conn, req, req.params.id);
+    assertKitchen(req.user, d.kitchen_id);
+    if (d.status !== 'loaded') throw bad('Only a loaded delivery can be confirmed as delivered');
+    await conn.query("UPDATE dispatches SET status = 'delivered', delivered_by = ?, delivered_at = NOW() WHERE id = ?", [req.user.id, d.id]);
+    await audit(req, 'deliver', 'dispatch', d.id, null, conn);
+  });
+  res.json({ ok: true });
+}));
+
+// Site Administrator records the number of dishes received
 router.post('/catering/dispatches/:id(\\d+)/receive', requirePerm('meals.receive'), wrap(async (req, res) => {
   const qty = Number(req.body.received_qty);
   await db.tx(async (conn) => {
-    const [[d]] = await conn.query('SELECT * FROM dispatches WHERE id = ? FOR UPDATE', [req.params.id]);
-    if (!d) throw notFound('Dispatch');
+    const d = await getDispatch(conn, req, req.params.id);
     assertSite(req.user, d.site_id);
     if (d.status === 'received') throw bad('This delivery has already been confirmed');
-    if (!Number.isInteger(qty) || qty < 0 || qty > d.dispatched_qty) throw bad(`Received quantity must be between 0 and ${d.dispatched_qty}`);
+    if (!['loaded', 'delivered'].includes(d.status)) throw bad('This delivery has not left the kitchen yet');
+    if (!Number.isInteger(qty) || qty < 0 || qty > d.loaded_qty) throw bad(`Received quantity must be between 0 and ${d.loaded_qty}`);
     await conn.query('INSERT INTO deliveries (dispatch_id, received_qty, received_at, received_by, condition_notes) VALUES (?,?,NOW(),?,?)',
       [d.id, qty, req.user.id, req.body.condition_notes || null]);
     await conn.query("UPDATE dispatches SET status = 'received' WHERE id = ?", [d.id]);
@@ -342,6 +473,7 @@ router.get('/catering/distributions', requirePerm('catering.view', 'meals.receiv
     WHERE ${where.join(' AND ')} ORDER BY md.service_date DESC, s.name LIMIT 1000`, params));
 }));
 
+// Site Administrator confirms meals distributed to workers
 router.post('/catering/distributions', requirePerm('meals.receive'), wrap(async (req, res) => {
   const { site_id: siteId, service_date: date, meal_type: meal, notes } = req.body || {};
   const qty = Number(req.body.distributed_qty);
@@ -353,8 +485,7 @@ router.post('/catering/distributions', requirePerm('meals.receive'), wrap(async 
         WHERE d.site_id = ? AND d.service_date = ? AND d.meal_type = ?`, [siteId, date, meal]);
     const [given] = await conn.query(
       'SELECT distributed_qty FROM meal_distributions WHERE site_id = ? AND service_date = ? AND meal_type = ? FOR UPDATE', [siteId, date, meal]);
-    const t = { received: rec.received, given: given.reduce((n, g) => n + g.distributed_qty, 0) };
-    const left = Number(t.received) - Number(t.given);
+    const left = Number(rec.received) - given.reduce((n, g) => n + g.distributed_qty, 0);
     if (qty > left) throw bad(`Only ${left} received meals are left to distribute`);
     const [r] = await conn.query('INSERT INTO meal_distributions (site_id, service_date, meal_type, distributed_qty, notes, recorded_by) VALUES (?,?,?,?,?,?)',
       [siteId, date, meal, qty, notes || null, req.user.id]);
@@ -371,7 +502,8 @@ router.get('/catering/traceability', requirePerm('catering.view', 'meals.receive
   const sites = await db.query(
     `SELECT s.id AS site_id, s.name AS site_name, p.name AS project_name, c.name AS client_name, m.meal_type,
             COALESCE((SELECT required_qty FROM meal_orders mo WHERE mo.site_id = s.id AND mo.service_date = ? AND mo.meal_type = m.meal_type), 0) AS required,
-            COALESCE((SELECT SUM(dispatched_qty) FROM dispatches d WHERE d.site_id = s.id AND d.service_date = ? AND d.meal_type = m.meal_type), 0) AS dispatched,
+            COALESCE((SELECT SUM(loaded_qty) FROM dispatches d WHERE d.site_id = s.id AND d.service_date = ? AND d.meal_type = m.meal_type
+                       AND d.status IN ('loaded','delivered','received')), 0) AS dispatched,
             COALESCE((SELECT SUM(del.received_qty) FROM deliveries del JOIN dispatches d ON d.id = del.dispatch_id
                        WHERE d.site_id = s.id AND d.service_date = ? AND d.meal_type = m.meal_type), 0) AS received,
             COALESCE((SELECT SUM(distributed_qty) FROM meal_distributions md WHERE md.site_id = s.id AND md.service_date = ? AND md.meal_type = m.meal_type), 0) AS distributed
@@ -384,8 +516,8 @@ router.get('/catering/traceability', requirePerm('catering.view', 'meals.receive
     .filter((r) => r.required || r.dispatched || r.received || r.distributed);
   const kitchens = req.user.can('catering.view') ? (await plansFor(req.user, { date })).map((p) => ({
     kitchen_id: p.kitchen_id, kitchen_name: p.kitchen_name, meal_type: p.meal_type, required: p.required_qty, planned: p.planned_qty,
-    produced: Number(p.produced_qty), rejected: Number(p.rejected_qty), dispatched: Number(p.dispatched_qty),
-    remaining_at_kitchen: Number(p.produced_qty) - Number(p.rejected_qty) - Number(p.dispatched_qty), status: p.status,
+    produced: Number(p.produced_qty), rejected: Number(p.rejected_qty), approved: Number(p.approved_qty), dispatched: Number(p.dispatched_qty),
+    remaining_at_kitchen: Number(p.approved_qty) - Number(p.dispatched_qty), status: p.status,
   })) : [];
   res.json({ date, sites: siteRows, kitchens });
 }));

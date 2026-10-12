@@ -124,10 +124,20 @@ CREATE TABLE IF NOT EXISTS workers (
   emergency_contact_name VARCHAR(120) NULL,
   emergency_contact_phone VARCHAR(40) NULL,
   status ENUM('active','inactive','suspended','terminated') NOT NULL DEFAULT 'active',
+  deployment_status ENUM('available','deployed','absent','unassigned') NOT NULL DEFAULT 'unassigned',
   job_position VARCHAR(100) NULL,
   category VARCHAR(60) NULL,
   pay_rate DECIMAL(12,2) NOT NULL DEFAULT 0,
   pay_rate_type ENUM('hourly','daily') NOT NULL DEFAULT 'daily',
+  daily_allowance DECIMAL(12,2) NOT NULL DEFAULT 0,
+  contract_type VARCHAR(40) NULL,
+  contract_start DATE NULL,
+  contract_end DATE NULL,
+  cnss_number VARCHAR(40) NULL,
+  insurance_provider VARCHAR(120) NULL,
+  insurance_policy VARCHAR(60) NULL,
+  insurance_expiry DATE NULL,
+  candidate_id INT UNSIGNED NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_workers_code (worker_code),
@@ -165,6 +175,9 @@ CREATE TABLE IF NOT EXISTS worker_assignments (
   pay_rate DECIMAL(12,2) NOT NULL DEFAULT 0,
   pay_rate_type ENUM('hourly','daily') NOT NULL DEFAULT 'daily',
   status ENUM('active','ended','cancelled') NOT NULL DEFAULT 'active',
+  assignment_type ENUM('regular','replacement') NOT NULL DEFAULT 'regular',
+  replaces_worker_id INT UNSIGNED NULL,
+  staffing_request_id INT UNSIGNED NULL,
   notes VARCHAR(255) NULL,
   end_reason VARCHAR(255) NULL,
   created_by INT UNSIGNED NULL,
@@ -371,6 +384,7 @@ CREATE TABLE IF NOT EXISTS meal_plans (
   meal_type ENUM('lunch','dinner') NOT NULL,
   required_qty INT UNSIGNED NOT NULL DEFAULT 0,
   planned_qty INT UNSIGNED NOT NULL DEFAULT 0,
+  menu_id INT UNSIGNED NULL,
   menu VARCHAR(255) NULL,
   status ENUM('draft','confirmed','in_production','completed') NOT NULL DEFAULT 'draft',
   created_by INT UNSIGNED NULL,
@@ -385,6 +399,10 @@ CREATE TABLE IF NOT EXISTS production_batches (
   meal_plan_id INT UNSIGNED NOT NULL,
   produced_qty INT UNSIGNED NOT NULL DEFAULT 0,
   rejected_qty INT UNSIGNED NOT NULL DEFAULT 0,
+  quality_status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+  quality_checked_by INT UNSIGNED NULL,
+  quality_checked_at DATETIME NULL,
+  quality_notes VARCHAR(255) NULL,
   produced_at DATETIME NOT NULL,
   notes VARCHAR(255) NULL,
   recorded_by INT UNSIGNED NULL,
@@ -400,10 +418,19 @@ CREATE TABLE IF NOT EXISTS dispatches (
   site_id INT UNSIGNED NOT NULL,
   service_date DATE NOT NULL,
   meal_type ENUM('lunch','dinner') NOT NULL,
-  dispatched_qty INT UNSIGNED NOT NULL DEFAULT 0,
-  status ENUM('prepared','dispatched','received') NOT NULL DEFAULT 'prepared',
+  planned_qty INT UNSIGNED NOT NULL DEFAULT 0,
+  planned_departure DATETIME NULL,
+  dispatched_qty INT UNSIGNED NOT NULL DEFAULT 0,   -- quantity validated by the Catering Director
+  loaded_qty INT UNSIGNED NULL,
+  status ENUM('planned','validated','loaded','delivered','received','cancelled') NOT NULL DEFAULT 'planned',
   vehicle VARCHAR(60) NULL,
   driver VARCHAR(120) NULL,
+  validated_by INT UNSIGNED NULL,
+  validated_at DATETIME NULL,
+  loaded_by INT UNSIGNED NULL,
+  loaded_at DATETIME NULL,
+  delivered_by INT UNSIGNED NULL,
+  delivered_at DATETIME NULL,
   dispatched_at DATETIME NULL,
   notes VARCHAR(255) NULL,
   recorded_by INT UNSIGNED NULL,
@@ -449,6 +476,12 @@ CREATE TABLE IF NOT EXISTS catering_expenses (
   description VARCHAR(255) NULL,
   amount DECIMAL(14,2) NOT NULL,
   reference VARCHAR(80) NULL,
+  document_type ENUM('invoice','purchase_order','delivery_note','receipt','other') NOT NULL DEFAULT 'invoice',
+  approval_status ENUM('pending','validated','rejected') NOT NULL DEFAULT 'pending',
+  approved_by INT UNSIGNED NULL,
+  approved_at DATETIME NULL,
+  approval_notes VARCHAR(255) NULL,
+  purchase_request_id INT UNSIGNED NULL,
   recorded_by INT UNSIGNED NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY ix_ce_date (expense_date),
@@ -556,6 +589,8 @@ CREATE TABLE IF NOT EXISTS hse_corrective_actions (
   due_date DATE NOT NULL,
   status ENUM('open','in_progress','done') NOT NULL DEFAULT 'open',
   completed_at DATETIME NULL,
+  approved_by INT UNSIGNED NULL,
+  approved_at DATETIME NULL,
   created_by INT UNSIGNED NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY ix_hca_incident (incident_id),
@@ -606,7 +641,8 @@ CREATE TABLE IF NOT EXISTS medical_records (
 CREATE TABLE IF NOT EXISTS settings (
   setting_key VARCHAR(60) NOT NULL PRIMARY KEY,
   setting_value VARCHAR(255) NOT NULL,
-  description VARCHAR(255) NULL
+  description VARCHAR(255) NULL,
+  edit_permission VARCHAR(60) NOT NULL DEFAULT 'settings.manage'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -621,4 +657,158 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   KEY ix_audit_entity (entity, entity_id),
   KEY ix_audit_user (user_id, created_at),
   KEY ix_audit_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =====================================================================
+-- Added for the roles in "SYSTEM PRIVILEGES BY ROLE"
+-- =====================================================================
+
+-- Daily workforce report a Site Administrator submits (deadline set in Settings, default 09:00)
+CREATE TABLE IF NOT EXISTS site_daily_reports (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  site_id INT UNSIGNED NOT NULL,
+  report_date DATE NOT NULL,
+  present_count INT UNSIGNED NOT NULL DEFAULT 0,
+  absent_count INT UNSIGNED NOT NULL DEFAULT 0,
+  overtime_hours DECIMAL(7,2) NOT NULL DEFAULT 0,
+  notes VARCHAR(500) NULL,
+  on_time TINYINT(1) NOT NULL DEFAULT 1,
+  submitted_by INT UNSIGNED NULL,
+  submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_sdr (site_id, report_date),
+  CONSTRAINT fk_sdr_site FOREIGN KEY (site_id) REFERENCES sites(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Recruitment: job profiles and candidates
+CREATE TABLE IF NOT EXISTS job_profiles (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(100) NOT NULL,
+  category VARCHAR(60) NULL,
+  requirements TEXT NULL,
+  required_documents VARCHAR(255) NULL,
+  status ENUM('open','closed') NOT NULL DEFAULT 'open',
+  created_by INT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS candidates (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  job_profile_id INT UNSIGNED NULL,
+  first_name VARCHAR(80) NOT NULL,
+  last_name VARCHAR(80) NOT NULL,
+  phone VARCHAR(40) NULL,
+  email VARCHAR(150) NULL,
+  national_id VARCHAR(60) NULL,
+  qualifications TEXT NULL,
+  status ENUM('registered','documents_verified','documents_rejected','approved','rejected','hired') NOT NULL DEFAULT 'registered',
+  id_document_ok TINYINT(1) NULL,
+  qualifications_ok TINYINT(1) NULL,
+  verification_notes VARCHAR(500) NULL,
+  verified_by INT UNSIGNED NULL,
+  verified_at DATETIME NULL,
+  decision_notes VARCHAR(500) NULL,
+  decided_by INT UNSIGNED NULL,
+  decided_at DATETIME NULL,
+  worker_id INT UNSIGNED NULL,
+  registered_by INT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY ix_cand_status (status),
+  CONSTRAINT fk_cand_profile FOREIGN KEY (job_profile_id) REFERENCES job_profiles(id),
+  CONSTRAINT fk_cand_worker FOREIGN KEY (worker_id) REFERENCES workers(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Staffing requests from clients, received at a site and forwarded to recruitment
+CREATE TABLE IF NOT EXISTS staffing_requests (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  site_id INT UNSIGNED NOT NULL,
+  requested_by_client VARCHAR(150) NULL,
+  job_position VARCHAR(100) NOT NULL,
+  quantity INT UNSIGNED NOT NULL DEFAULT 1,
+  needed_from DATE NOT NULL,
+  needed_until DATE NULL,
+  details VARCHAR(500) NULL,
+  status ENUM('received','forwarded','in_progress','filled','cancelled') NOT NULL DEFAULT 'received',
+  response_notes VARCHAR(500) NULL,
+  received_by INT UNSIGNED NULL,
+  received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  forwarded_at DATETIME NULL,
+  handled_by INT UNSIGNED NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY ix_sr_status (status),
+  CONSTRAINT fk_sr_site FOREIGN KEY (site_id) REFERENCES sites(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS menus (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(120) NOT NULL,
+  meal_type ENUM('lunch','dinner') NOT NULL,
+  dishes TEXT NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_by INT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Everything recorded by kitchen, sealing, transport teams and site feedback:
+-- ingredient preparation, cooking, cleaning, damaged equipment, packaging, labels, loading,
+-- delays, losses, shortages, complaints.
+CREATE TABLE IF NOT EXISTS operation_logs (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  log_type VARCHAR(40) NOT NULL,
+  kitchen_id INT UNSIGNED NULL,
+  site_id INT UNSIGNED NULL,
+  meal_plan_id INT UNSIGNED NULL,
+  dispatch_id INT UNSIGNED NULL,
+  stock_item_id INT UNSIGNED NULL,
+  quantity DECIMAL(12,3) NULL,
+  description VARCHAR(1000) NULL,
+  status ENUM('open','acknowledged','closed') NOT NULL DEFAULT 'open',
+  response VARCHAR(500) NULL,
+  handled_by INT UNSIGNED NULL,
+  handled_at DATETIME NULL,
+  log_date DATE NOT NULL,
+  recorded_by INT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY ix_ol_kitchen (kitchen_id, log_date),
+  KEY ix_ol_site (site_id, log_date),
+  KEY ix_ol_type (log_type, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Purchase requests (Catering Director requests, DAF approves; above the limit the MD approves)
+CREATE TABLE IF NOT EXISTS purchase_requests (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  kitchen_id INT UNSIGNED NULL,
+  items TEXT NOT NULL,
+  supplier VARCHAR(150) NULL,
+  estimated_amount DECIMAL(14,2) NOT NULL,
+  needed_by DATE NULL,
+  justification VARCHAR(500) NULL,
+  status ENUM('submitted','approved','rejected','cancelled') NOT NULL DEFAULT 'submitted',
+  requires_major_approval TINYINT(1) NOT NULL DEFAULT 0,
+  decision_notes VARCHAR(500) NULL,
+  decided_by INT UNSIGNED NULL,
+  decided_at DATETIME NULL,
+  requested_by INT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY ix_pr_status (status),
+  CONSTRAINT fk_pr_kitchen FOREIGN KEY (kitchen_id) REFERENCES kitchens(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS budgets (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(150) NOT NULL,
+  client_id INT UNSIGNED NULL,
+  project_id INT UNSIGNED NULL,
+  kitchen_id INT UNSIGNED NULL,
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  amount DECIMAL(14,2) NOT NULL,
+  status ENUM('draft','approved','rejected') NOT NULL DEFAULT 'draft',
+  notes VARCHAR(500) NULL,
+  approved_by INT UNSIGNED NULL,
+  approved_at DATETIME NULL,
+  created_by INT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_b_client FOREIGN KEY (client_id) REFERENCES clients(id),
+  CONSTRAINT fk_b_project FOREIGN KEY (project_id) REFERENCES projects(id),
+  CONSTRAINT fk_b_kitchen FOREIGN KEY (kitchen_id) REFERENCES kitchens(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

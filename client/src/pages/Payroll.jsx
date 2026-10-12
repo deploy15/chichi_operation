@@ -23,6 +23,7 @@ export default function Payroll() {
     { key: 'pay_rate', label: 'Rate', num: true, render: (r) => `${fmtMoney(r.pay_rate)}/${r.pay_rate_type === 'hourly' ? 'h' : 'day'}` },
     { key: 'normal_pay', label: 'Normal pay', num: true, render: (r) => fmtMoney(r.normal_pay) },
     { key: 'overtime_pay', label: 'Overtime pay', num: true, render: (r) => fmtMoney(r.overtime_pay) },
+    { key: 'allowance_pay', label: 'Allowances', num: true, render: (r) => fmtMoney(r.allowance_pay) },
     { key: 'total_pay', label: 'Total', num: true, render: (r) => <strong>{fmtMoney(r.total_pay)}</strong> },
   ];
   const download = () => {
@@ -50,6 +51,7 @@ export default function Payroll() {
             <Stat label="Total pay" value={fmtMoney(d.totals.total_pay || 0)} />
             <Stat label="Normal pay" value={fmtMoney(d.totals.normal_pay || 0)} />
             <Stat label="Overtime pay" value={fmtMoney(d.totals.overtime_pay || 0)} hint={`${fmtNum(d.totals.overtime_hours || 0, 1)} hours`} />
+            <Stat label="Allowances" value={fmtMoney(d.totals.allowance_pay || 0)} />
             <Stat label="Worker-days" value={fmtNum(d.totals.days_present || 0)} />
           </div>
           {!validatedOnly && d.rows.some((r) => Number(r.days_not_validated)) && <Alert tone="warning">Some days included here are not confirmed yet.</Alert>}

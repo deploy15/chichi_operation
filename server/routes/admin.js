@@ -4,7 +4,8 @@ const bcrypt = require('bcryptjs');
 const db = require('../lib/db');
 const { audit } = require('../lib/audit');
 const { requirePerm } = require('../lib/auth');
-const { wrap, bad, notFound } = require('../lib/http');
+const { wrap, bad, notFound, forbidden } = require('../lib/http');
+const { FULL_ACCESS_ROLE } = require('../lib/permissions');
 
 const router = express.Router();
 const admin = requirePerm('users.manage');
@@ -105,7 +106,7 @@ router.put('/roles/:id(\\d+)', admin, wrap(async (req, res) => {
   const role = await db.one('SELECT * FROM roles WHERE id = ?', [req.params.id]);
   if (!role) throw notFound('Role');
   const { name, description, permissions } = req.body || {};
-  if (role.name === 'Super Administrator' && ((name && name !== role.name) || permissions)) throw bad('The Super Administrator role always has full access and cannot be changed');
+  if (role.name === FULL_ACCESS_ROLE && ((name && name !== role.name) || permissions)) throw bad('The Managing Director role always has full access and cannot be changed');
   if (role.id === req.user.role_id && Array.isArray(permissions) && !permissions.includes('users.manage')) {
     throw bad('You cannot remove user management from your own role (you would lock yourself out)');
   }
@@ -120,7 +121,7 @@ router.put('/roles/:id(\\d+)', admin, wrap(async (req, res) => {
 router.delete('/roles/:id(\\d+)', admin, wrap(async (req, res) => {
   const role = await db.one('SELECT r.*, (SELECT COUNT(*) FROM users u WHERE u.role_id = r.id) AS n FROM roles r WHERE r.id = ?', [req.params.id]);
   if (!role) throw notFound('Role');
-  if (role.name === 'Super Administrator') throw bad('This role cannot be deleted');
+  if (role.name === FULL_ACCESS_ROLE) throw bad('This role cannot be deleted');
   if (role.n > 0) throw bad('Move the users in this role to another role first');
   await db.query('DELETE FROM roles WHERE id = ?', [role.id]);
   await audit(req, 'delete', 'role', role.id, { name: role.name });
@@ -131,12 +132,20 @@ router.get('/settings', wrap(async (req, res) => {
   res.json(await db.query('SELECT * FROM settings ORDER BY setting_key'));
 }));
 
-router.put('/settings', admin, wrap(async (req, res) => {
-  const entries = Object.entries(req.body || {});
+// Each setting names the permission needed to change it (payroll rules: payroll.manage; the rest: settings.manage)
+router.put('/settings', wrap(async (req, res) => {
+  const rows = await db.query('SELECT setting_key, edit_permission FROM settings');
+  const perm = Object.fromEntries(rows.map((r) => [r.setting_key, r.edit_permission]));
+  const entries = Object.entries(req.body || {}).filter(([k]) => perm[k]);
+  const denied = entries.filter(([k]) => !req.user.can(perm[k]));
+  if (denied.length) throw forbidden(`You cannot change: ${denied.map(([k]) => k.replace(/_/g, ' ')).join(', ')}`);
   for (const [k, v] of entries) {
-    await db.query('UPDATE settings SET setting_value = ? WHERE setting_key = ?', [String(v), k]);
+    if (k === 'daily_report_deadline' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v))) throw bad('Deadline must be a time like 09:00');
+    if (k === 'company_timezone') { try { new Intl.DateTimeFormat('en', { timeZone: String(v) }); } catch { throw bad('Unknown time zone'); } }
+    if (['overtime_multiplier', 'standard_hours_per_day', 'major_expense_threshold'].includes(k) && !(Number(v) > 0)) throw bad(`${k.replace(/_/g, ' ')} must be a number above 0`);
   }
-  await audit(req, 'update', 'settings', null, req.body);
+  for (const [k, v] of entries) await db.query('UPDATE settings SET setting_value = ? WHERE setting_key = ?', [String(v), k]);
+  await audit(req, 'update', 'settings', null, Object.fromEntries(entries));
   res.json({ ok: true });
 }));
 
@@ -153,7 +162,7 @@ router.get('/audit', requirePerm('audit.view'), wrap(async (req, res) => {
 // Lookup lists used by drop-downs (names only)
 router.get('/lookups', wrap(async (req, res) => {
   const out = {};
-  if (req.user.can('users.manage') || req.user.can('catering.view') || req.user.can('finance.view')) {
+  if (req.user.can('users.manage') || req.user.can('catering.view') || req.user.can('finance.view') || req.user.can('kitchen.view')) {
     out.kitchens = await db.query('SELECT id, name, kitchen_type, status FROM kitchens ORDER BY name');
   }
   if (req.user.can('users.manage')) out.roles = await db.query('SELECT id, name FROM roles ORDER BY name');

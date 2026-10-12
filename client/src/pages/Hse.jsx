@@ -64,6 +64,12 @@ function HseDashboard() {
         <Card title="By type"><BarList items={d.by_type} /></Card>
         <Card title="Trend (last 12 months)"><BarList items={d.trend} /></Card>
       </div>
+      {d.awaiting_approval && d.awaiting_approval.length > 0 && (
+        <Card title="Completed actions waiting for the Managing Director's approval">
+          <Table rows={d.awaiting_approval} columns={[{ key: 'description', label: 'Action', render: (a) => <Link to={`/hse/${a.incident_id}`}>{a.description}</Link> },
+            { key: 'responsible_name', label: 'Responsible' }, { key: 'completed_at', label: 'Completed', type: 'datetime' }, { key: 'site_name', label: 'Site' }]} />
+        </Card>
+      )}
       <Card title="Overdue corrective actions">
         <Table rows={d.overdue_actions} empty="No overdue actions."
           columns={[{ key: 'description', label: 'Action', render: (a) => <Link to={`/hse/${a.incident_id}`}>{a.description}</Link> }, { key: 'responsible_name', label: 'Responsible' },
@@ -147,10 +153,12 @@ function IncidentDetail() {
           rowClass={(a) => (a.status !== 'done' && a.due_date < todayStr() ? 'overdue' : '')}
           columns={[{ key: 'description', label: 'Action' }, { key: 'responsible_name', label: 'Responsible' }, { key: 'due_date', label: 'Due', render: (a) => fmtDate(a.due_date) },
             { key: 'status', label: 'Status', type: 'badge' },
-            { key: 'act', label: '', render: (a) => manage && a.status !== 'done' && (
+            { key: 'approval', label: 'Approved', render: (a) => (a.approved_at ? `${a.approved_by_name || ''} ${fmtDate(a.approved_at)}` : a.status === 'done' ? <Badge value="awaiting approval" tone="orange" /> : '') },
+            { key: 'act', label: '', render: (a) => (
               <span className="row-actions">
-                {a.status === 'open' && <button className="link" onClick={async () => { await api.put(`/hse/actions/${a.id}`, { status: 'in_progress' }); inc.reload(); }}>Start</button>}
-                <button className="link" onClick={async () => { await api.put(`/hse/actions/${a.id}`, { status: 'done' }); inc.reload(); }}>Mark done</button>
+                {manage && a.status === 'open' && <button className="link" onClick={async () => { await api.put(`/hse/actions/${a.id}`, { status: 'in_progress' }); inc.reload(); }}>Start</button>}
+                {manage && a.status !== 'done' && <button className="link" onClick={async () => { await api.put(`/hse/actions/${a.id}`, { status: 'done' }); inc.reload(); }}>Mark done</button>}
+                {can('hse.approve') && a.status === 'done' && !a.approved_at && <button className="btn btn-small" onClick={async () => { await api.post(`/hse/actions/${a.id}/approve`, {}); inc.reload(); }}>Approve</button>}
               </span>) }]} />
       </Card>
       {modal === 'edit' && (
