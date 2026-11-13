@@ -11,15 +11,17 @@ const { audit } = require('../lib/audit');
 const { requirePerm, siteFilter, assertSite } = require('../lib/auth');
 const { wrap, bad, notFound, isDate, today } = require('../lib/http');
 const { getSettings, localNow } = require('../lib/settings');
+const { MEAL_SQL } = require('../lib/meals');
 
 const router = express.Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DATA_FIELDS = ['status', 'late_arrival', 'early_departure', 'normal_hours', 'overtime_hours', 'comments'];
+const DATA_FIELDS = ['status', 'late_arrival', 'early_departure', 'normal_hours', 'overtime_hours', 'lunch', 'dinner', 'comments'];
+const flag = (v) => (v === null || v === undefined || v === '' ? null : Number(v) ? 1 : 0);
 
 const snapshot = (r) => (r ? {
   id: r.id, assignment_id: r.assignment_id, work_date: r.work_date, status: r.status, late_arrival: Number(r.late_arrival),
   early_departure: Number(r.early_departure), normal_hours: Number(r.normal_hours), overtime_hours: Number(r.overtime_hours),
-  comments: r.comments, validated: Number(r.validated), version: r.version,
+  lunch: flag(r.lunch), dinner: flag(r.dinner), comments: r.comments, validated: Number(r.validated), version: r.version,
 } : null);
 
 // Roster: everyone assigned to a site on a date, with any attendance already recorded.
@@ -31,7 +33,7 @@ router.get('/attendance/roster', requirePerm('attendance.view', 'attendance.reco
     `SELECT wa.id AS assignment_id, wa.worker_id, wa.project_id, wa.site_id, wa.job_position, wa.start_date, wa.end_date, w.worker_code,
             CONCAT(w.first_name, ' ', w.last_name) AS worker_name,
             (SELECT GROUP_CONCAT(me.meal_type) FROM meal_entitlements me WHERE me.assignment_id = wa.id) AS meals,
-            a.id, a.status, a.late_arrival, a.early_departure, a.normal_hours, a.overtime_hours, a.comments,
+            a.id, a.status, a.late_arrival, a.early_departure, a.normal_hours, a.overtime_hours, a.lunch, a.dinner, a.comments,
             a.validated, a.version, a.updated_at
        FROM worker_assignments wa
        JOIN workers w ON w.id = wa.worker_id
@@ -61,6 +63,9 @@ function normalise(op) {
     early_departure: !absent && op.early_departure ? 1 : 0,
     normal_hours: absent ? 0 : Number(op.normal_hours || 0),
     overtime_hours: absent ? 0 : Number(op.overtime_hours || 0),
+    // Meals for the day: none when absent; not sent (older devices) = follow the meal entitlement
+    lunch: absent ? 0 : flag(op.lunch),
+    dinner: absent ? 0 : flag(op.dinner),
     comments: op.comments ? String(op.comments).slice(0, 500) : null,
   };
 }
@@ -102,10 +107,10 @@ async function applyOp(req, op, deviceId) {
     if (!existing) {
       const [r] = await conn.query(
         `INSERT INTO attendance (uuid, assignment_id, worker_id, project_id, site_id, work_date, status, late_arrival, early_departure,
-           normal_hours, overtime_hours, comments, source, recorded_by, updated_by)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           normal_hours, overtime_hours, lunch, dinner, comments, source, recorded_by, updated_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [op.op_id, asg.id, asg.worker_id, asg.project_id, asg.site_id, op.work_date, data.status, data.late_arrival, data.early_departure,
-          data.normal_hours, data.overtime_hours, data.comments, source, user.id, user.id]);
+          data.normal_hours, data.overtime_hours, data.lunch, data.dinner, data.comments, source, user.id, user.id]);
       await conn.query('INSERT INTO attendance_history (attendance_id, version, op_id, change_type, new_data, changed_by) VALUES (?,?,?,?,?,?)',
         [r.insertId, 1, op.op_id, 'create', JSON.stringify(data), user.id]);
       await logOp(conn, op, user, deviceId, r.insertId, 'applied');
@@ -130,10 +135,10 @@ async function applyOp(req, op, deviceId) {
 
     const keepValidated = existing.validated && user.can('attendance.validate') ? 1 : 0;
     await conn.query(
-      `UPDATE attendance SET status=?, late_arrival=?, early_departure=?, normal_hours=?, overtime_hours=?, comments=?,
+      `UPDATE attendance SET status=?, late_arrival=?, early_departure=?, normal_hours=?, overtime_hours=?, lunch=?, dinner=?, comments=?,
          validated=?, validated_by=IF(?, validated_by, NULL), validated_at=IF(?, validated_at, NULL), version = version + 1, updated_by=?, source=?
        WHERE id = ?`,
-      [data.status, data.late_arrival, data.early_departure, data.normal_hours, data.overtime_hours, data.comments,
+      [data.status, data.late_arrival, data.early_departure, data.normal_hours, data.overtime_hours, data.lunch, data.dinner, data.comments,
         keepValidated, keepValidated, keepValidated, user.id, source, existing.id]);
     await conn.query('INSERT INTO attendance_history (attendance_id, version, op_id, change_type, old_data, new_data, changed_by) VALUES (?,?,?,?,?,?,?)',
       [existing.id, existing.version + 1, op.op_id, 'update', JSON.stringify(snapshot(existing)), JSON.stringify(data), user.id]);
@@ -222,7 +227,8 @@ router.get('/attendance', requirePerm('attendance.view'), wrap(async (req, res) 
   for (const k of ['site_id', 'project_id', 'worker_id']) if (req.query[k]) { where.push(`a.${k} = ?`); params.push(req.query[k]); }
   if (req.query.client_id) { where.push('p.client_id = ?'); params.push(req.query.client_id); }
   res.json(await db.query(
-    `SELECT a.*, CONCAT(w.first_name, ' ', w.last_name) AS worker_name, w.worker_code, s.name AS site_name, p.name AS project_name
+    `SELECT a.*, CONCAT(w.first_name, ' ', w.last_name) AS worker_name, w.worker_code, s.name AS site_name, p.name AS project_name,
+            ${MEAL_SQL('lunch')} AS lunch, ${MEAL_SQL('dinner')} AS dinner
        FROM attendance a JOIN workers w ON w.id = a.worker_id JOIN sites s ON s.id = a.site_id JOIN projects p ON p.id = a.project_id
       WHERE ${where.join(' AND ')} ORDER BY a.work_date DESC, s.name, w.last_name LIMIT 5000`, params));
 }));
@@ -257,9 +263,9 @@ router.post('/sync/conflicts/:id(\\d+)/resolve', requirePerm('attendance.validat
     if (action === 'apply_device') {
       const d = typeof c.client_data === 'string' ? JSON.parse(c.client_data) : c.client_data;
       await conn.query(
-        `UPDATE attendance SET status=?, late_arrival=?, early_departure=?, normal_hours=?, overtime_hours=?, comments=?,
+        `UPDATE attendance SET status=?, late_arrival=?, early_departure=?, normal_hours=?, overtime_hours=?, lunch=?, dinner=?, comments=?,
            validated=0, validated_by=NULL, validated_at=NULL, version = version + 1, updated_by=? WHERE id = ?`,
-        [d.status, d.late_arrival, d.early_departure, d.normal_hours, d.overtime_hours, d.comments, req.user.id, att.id]);
+        [d.status, d.late_arrival, d.early_departure, d.normal_hours, d.overtime_hours, flag(d.lunch), flag(d.dinner), d.comments, req.user.id, att.id]);
       await conn.query('INSERT INTO attendance_history (attendance_id, version, op_id, change_type, old_data, new_data, changed_by) VALUES (?,?,?,?,?,?,?)',
         [att.id, att.version + 1, c.op_id, 'conflict_applied', JSON.stringify(snapshot(att)), JSON.stringify(d), req.user.id]);
     }

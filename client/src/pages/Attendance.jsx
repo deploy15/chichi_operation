@@ -11,6 +11,10 @@ import { Alert, Badge, Card, ErrorMsg, PageHeader, Table, Tabs, useLoad } from '
 
 const DEFAULT_HOURS = 8;
 const inRange = (r, date) => r.start_date <= date && (!r.end_date || r.end_date >= date);
+const MEALS = ['lunch', 'dinner'];
+// Meal given that day: the choice made on the register, otherwise the assignment's meal entitlement
+const mealOn = (r, v, meal) => (v.status !== 'present' ? false
+  : v[meal] === null || v[meal] === undefined ? (r.meals || []).includes(meal) : !!Number(v[meal]));
 
 async function loadSites() {
   try {
@@ -36,7 +40,7 @@ async function loadRoster(siteId, date) {
     // A day not opened before: start from the last known list of workers for this site
     const base = (await cache.get(`rosterBase:${siteId}`)) || [];
     return {
-      rows: base.filter((r) => inRange(r, date)).map((r) => ({ ...r, id: null, status: null, late_arrival: 0, early_departure: 0, normal_hours: null, overtime_hours: null, comments: null, validated: 0, version: 0 })),
+      rows: base.filter((r) => inRange(r, date)).map((r) => ({ ...r, id: null, status: null, late_arrival: 0, early_departure: 0, normal_hours: null, overtime_hours: null, lunch: null, dinner: null, comments: null, validated: 0, version: 0 })),
       offline: true,
       fromBase: true,
     };
@@ -124,7 +128,9 @@ function Register() {
       const cur = { ...rowValue(r), ...(e[r.assignment_id] || {}) };
       const next = { ...cur, ...patch };
       if (patch.status === 'present' && (cur.normal_hours === null || cur.normal_hours === undefined || cur.status === 'absent')) next.normal_hours = DEFAULT_HOURS;
-      if (patch.status === 'absent') Object.assign(next, { normal_hours: 0, overtime_hours: 0, late_arrival: 0, early_departure: 0 });
+      // Marked present: meals start from the worker's entitlement and can then be changed for the day
+      if (patch.status === 'present' && cur.status !== 'present') MEALS.forEach((m) => { next[m] = r.meals.includes(m) ? 1 : 0; });
+      if (patch.status === 'absent') Object.assign(next, { normal_hours: 0, overtime_hours: 0, late_arrival: 0, early_departure: 0, lunch: 0, dinner: 0 });
       return { ...e, [r.assignment_id]: next };
     });
   };
@@ -140,6 +146,7 @@ function Register() {
         assignment_id: r.assignment_id, site_id: Number(siteId), work_date: date, worker_name: r.worker_name,
         status: v.status, late_arrival: !!Number(v.late_arrival), early_departure: !!Number(v.early_departure),
         normal_hours: Number(v.normal_hours || 0), overtime_hours: Number(v.overtime_hours || 0), comments: v.comments || null,
+        lunch: mealOn(r, v, 'lunch') ? 1 : 0, dinner: mealOn(r, v, 'dinner') ? 1 : 0,
         base_version: r.version || 0,
       });
     }
@@ -207,6 +214,7 @@ function Register() {
 
       <div className="register-summary muted">
         {roster && `${roster.length} assigned · ${recorded} recorded`}
+        {roster && ` · meals: ${MEALS.map((m) => `${roster.filter((r) => mealOn(r, rowValue(r), m)).length} ${m}`).join(', ')}`}
         {waitingHere > 0 && ` · ${waitingHere} waiting to be sent`}
         {sync.lastSync && ` · last sent ${fmtDateTime(sync.lastSync)}`}
         {sync.pending > 0 && sync.online && <button className="link" onClick={flush}>Send now</button>}
@@ -222,7 +230,7 @@ function Register() {
             <div key={r.assignment_id} className={`reg-row ${edits[r.assignment_id] ? 'edited' : ''}`}>
               <div className="reg-who">
                 <strong>{r.worker_name}</strong>
-                <span className="muted small">{r.worker_code} · {r.job_position || ''} · meals: {r.meals.map(label).join(', ') || 'none'}</span>
+                <span className="muted small">{r.worker_code} · {r.job_position || ''} · usual meals: {r.meals.map(label).join(', ') || 'none'}</span>
                 <span>
                   {Number(r.validated) ? <Badge value="reported" tone="green" /> : null}
                   {isPending && <Badge value={pendingByAsg[r.assignment_id].state === 'failed' ? 'not accepted' : 'waiting to send'} tone={pendingByAsg[r.assignment_id].state === 'failed' ? 'red' : 'orange'} />}
@@ -235,6 +243,13 @@ function Register() {
               <div className="reg-flags">
                 <label className="check"><input type="checkbox" disabled={dis || v.status !== 'present'} checked={!!Number(v.late_arrival)} onChange={(e) => setEdit(r, { late_arrival: e.target.checked ? 1 : 0 })} />Late</label>
                 <label className="check"><input type="checkbox" disabled={dis || v.status !== 'present'} checked={!!Number(v.early_departure)} onChange={(e) => setEdit(r, { early_departure: e.target.checked ? 1 : 0 })} />Left early</label>
+              </div>
+              <div className="reg-meals" role="group" aria-label="Meals">
+                <span className="reg-label">Meals</span>
+                {MEALS.map((m) => (
+                  <label key={m} className="check"><input type="checkbox" disabled={dis || v.status !== 'present'} checked={mealOn(r, v, m)}
+                    onChange={(e) => setEdit(r, { [m]: e.target.checked ? 1 : 0 })} />{label(m)}</label>
+                ))}
               </div>
               <div className="reg-hours">
                 <label>Hours<input type="number" min="0" max="24" step="0.5" disabled={dis || v.status !== 'present'} value={v.normal_hours ?? ''} onChange={(e) => setEdit(r, { normal_hours: e.target.value })} /></label>
@@ -262,7 +277,8 @@ function Conflicts() {
   const desc = (d) => {
     const x = typeof d === 'string' ? JSON.parse(d) : d;
     if (!x) return '';
-    return `${label(x.status)}${Number(x.late_arrival) ? ', late' : ''}${Number(x.early_departure) ? ', left early' : ''} · ${x.normal_hours}h + ${x.overtime_hours}h OT${x.comments ? ` · “${x.comments}”` : ''}`;
+    const meals = MEALS.filter((m) => Number(x[m])).map(label).join(' + ');
+    return `${label(x.status)}${Number(x.late_arrival) ? ', late' : ''}${Number(x.early_departure) ? ', left early' : ''} · ${x.normal_hours}h + ${x.overtime_hours}h OT${meals ? ` · ${meals}` : ''}${x.comments ? ` · “${x.comments}”` : ''}`;
   };
   return (
     <div>
@@ -316,6 +332,7 @@ function Report() {
         { key: 'work_date', label: 'Date', type: 'date' }, { key: 'worker_name', label: 'Worker' }, { key: 'site_name', label: 'Site' }, { key: 'project_name', label: 'Project' },
         { key: 'status', label: 'Status', type: 'badge' }, { key: 'late_arrival', label: 'Late', type: 'bool' }, { key: 'early_departure', label: 'Left early', type: 'bool' },
         { key: 'normal_hours', label: 'Hours', num: true }, { key: 'overtime_hours', label: 'Overtime', num: true },
+        { key: 'lunch', label: 'Lunch', type: 'bool' }, { key: 'dinner', label: 'Dinner', type: 'bool' },
         { key: 'validated', label: 'In daily report', type: 'bool' }, { key: 'source', label: 'Entered', type: 'label' }, { key: 'comments', label: 'Comment' },
       ]} />
     </div>

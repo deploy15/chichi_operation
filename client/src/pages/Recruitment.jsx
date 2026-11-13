@@ -2,11 +2,12 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { opts } from '../lib/format';
+import { opts, todayStr } from '../lib/format';
 import ResourcePage from '../components/ResourcePage';
-import { EntityForm, Modal, PageHeader, Tabs, useOptions } from '../components/ui';
+import { EntityForm, Modal, PageHeader, Tabs, useLoad, useOptions } from '../components/ui';
 
 const CANDIDATE_STATUSES = ['registered', 'documents_verified', 'documents_rejected', 'approved', 'rejected', 'hired'];
+const MEAL_OPTS = [{ value: 'lunch', label: 'Lunch' }, { value: 'dinner', label: 'Dinner' }];
 
 export default function Recruitment() {
   const [tab, setTab] = useState('candidates');
@@ -23,6 +24,14 @@ function Candidates() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const profiles = useOptions('/recruitment/job-profiles', (p) => ({ value: p.id, label: p.title }));
+  const canHire = can('workers.manage') && can('assignments.manage');
+  const tree = useLoad(() => (canHire ? api.get('/structure/tree') : Promise.resolve([])), [canHire]);
+  const clients = tree.data || [];
+  const clientOpts = clients.map((c) => ({ value: c.id, label: c.name }));
+  const projectsOf = (vals) => (clients.find((c) => String(c.id) === String(vals.client_id)) || { projects: [] }).projects;
+  const projectOpts = (vals) => projectsOf(vals).map((p) => ({ value: p.id, label: p.name }));
+  const siteOpts = (vals) => ((projectsOf(vals).find((p) => String(p.id) === String(vals.project_id)) || { sites: [] }).sites)
+    .filter((x) => x.status === 'active' || !x.status).map((x) => ({ value: x.id, label: x.name }));
   const [modal, setModal] = useState(null);
   const [v, setV] = useState(0);
   const done = () => { setModal(null); setV((x) => x + 1); };
@@ -31,8 +40,9 @@ function Candidates() {
       {can('recruitment.verify') && ['registered', 'documents_rejected', 'documents_verified'].includes(c.status) &&
         <button className="link" onClick={() => setModal({ verify: c })}>Check documents</button>}
       {can('recruitment.approve') && c.status === 'documents_verified' && <button className="link" onClick={() => setModal({ decide: c })}>Decide</button>}
-      {can('workers.manage') && c.status === 'approved' && <button className="link" onClick={() => setModal({ hire: c })}>Hire</button>}
-      {c.status === 'hired' && c.worker_id && <button className="link" onClick={() => navigate(`/workers/${c.worker_id}`)}>Worker {c.worker_code}</button>}
+      {canHire && c.status === 'approved' && <button className="link" onClick={() => setModal({ hire: c })}>Hire &amp; assign</button>}
+      {canHire && c.status === 'hired' && c.worker_id && !c.assigned_to && <button className="link" onClick={() => setModal({ hire: c })}>Assign to site</button>}
+      {c.status === 'hired' && c.worker_id && c.assigned_to && <button className="link" onClick={() => navigate(`/workers/${c.worker_id}`)}>Worker {c.worker_code}</button>}
     </span>
   );
   return (
@@ -43,7 +53,9 @@ function Candidates() {
           { key: 'name', label: 'Name', render: (c) => `${c.first_name} ${c.last_name}` }, { key: 'job_title', label: 'Job profile' },
           { key: 'phone', label: 'Phone' }, { key: 'national_id', label: 'ID no.' },
           { key: 'docs', label: 'Documents', render: (c) => (c.verified_at ? `ID ${c.id_document_ok ? '✓' : '✗'} · Qualifications ${c.qualifications_ok ? '✓' : '✗'}` : '') },
-          { key: 'status', label: 'Status', type: 'badge' }, { key: 'created_at', label: 'Registered', type: 'date' },
+          { key: 'status', label: 'Status', type: 'badge' },
+          { key: 'assigned_to', label: 'Assigned to (client / project / site)', render: (c) => c.assigned_to || (c.status === 'hired' ? <span className="muted">Not assigned yet</span> : '') },
+          { key: 'created_at', label: 'Registered', type: 'date' },
         ]}
         rowActions={actions}
         fields={[{ name: 'job_profile_id', label: 'Job profile', type: 'select', options: profiles }, { name: 'first_name', label: 'First name', required: true },
@@ -66,10 +78,22 @@ function Candidates() {
         </Modal>
       )}
       {modal && modal.hire && (
-        <Modal title={`Hire ${modal.hire.first_name} ${modal.hire.last_name}`} onClose={() => setModal(null)}>
-          <p className="muted">Creates a worker record marked "available", ready to be assigned to a site.</p>
-          <EntityForm submitLabel="Create worker" fields={[{ name: 'worker_code', label: 'Worker ID (leave empty for the next free number)' }]}
-            onCancel={() => setModal(null)} onSubmit={async (d) => { const r = await api.post(`/recruitment/candidates/${modal.hire.id}/hire`, d); navigate(`/workers/${r.worker_id}`); }} />
+        <Modal title={`${modal.hire.status === 'hired' ? 'Assign' : 'Hire and assign'} ${modal.hire.first_name} ${modal.hire.last_name}`} onClose={() => setModal(null)}>
+          <p className="muted">Choose the client, project and site this person will work at. The worker appears on the workers list once assigned.</p>
+          <EntityForm submitLabel={modal.hire.status === 'hired' ? 'Assign' : 'Hire and assign'}
+            initial={{ start_date: todayStr(), meals: ['lunch'], job_position: modal.hire.job_title || '' }}
+            fields={[
+              { name: 'client_id', label: 'Client', type: 'select', options: clientOpts, required: true, resets: ['project_id', 'site_id'] },
+              { name: 'project_id', label: 'Project', type: 'select', options: projectOpts, required: true, resets: ['site_id'] },
+              { name: 'site_id', label: 'Site', type: 'select', options: siteOpts, required: true },
+              { name: 'start_date', label: 'Start date', type: 'date', required: true },
+              { name: 'end_date', label: 'End date (leave empty if unknown)', type: 'date' },
+              { name: 'job_position', label: 'Job position' },
+              { name: 'meals', label: 'Usual meals (can be changed each day on the attendance register)', type: 'checkboxes', options: MEAL_OPTS, wide: true },
+              { name: 'worker_code', label: 'Worker ID (leave empty for the next free number)', hidden: modal.hire.status === 'hired' },
+            ]}
+            onCancel={() => setModal(null)}
+            onSubmit={async (d) => { const r = await api.post(`/recruitment/candidates/${modal.hire.id}/hire`, d); navigate(`/workers/${r.worker_id}`); }} />
         </Modal>
       )}
     </>

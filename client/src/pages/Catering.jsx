@@ -27,7 +27,7 @@ export default function Catering() {
   const dated = ['needs', 'production', 'deliveries', 'tracking', 'log', 'feedback'].includes(tab);
   return (
     <div>
-      <PageHeader title="Catering" subtitle="Meals are calculated from confirmed attendance: present + valid assignment + meal entitlement"
+      <PageHeader title="Catering" subtitle="Meals are calculated from confirmed attendance: present + valid assignment + lunch/dinner assigned on the daily register"
         actions={dated && <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Date" />} />
       <Tabs tabs={tabs} value={tab} onChange={setTab} />
       {tab === 'needs' && <Needs date={date} />}
@@ -79,6 +79,16 @@ function Needs({ date }) {
                 { key: 'kitchen_name', label: 'Kitchen', render: (r) => r.kitchen_name || <Badge value="no kitchen" tone="red" /> }]} />
           </Card>
         </div>
+      )}
+      {d && d.workers && (
+        <Card title={`Meals by worker (${d.workers.filter((w) => Number(w.lunch)).length} lunch · ${d.workers.filter((w) => Number(w.dinner)).length} dinner)`}>
+          <p className="muted small">Lunch and dinner are assigned to each worker on the daily attendance register. Workers whose daily report is not submitted yet are not counted in the totals above.</p>
+          <Table rows={d.workers} empty="No meals assigned on the attendance registers for this day."
+            columns={[{ key: 'client_name', label: 'Client' }, { key: 'project_name', label: 'Project' }, { key: 'site_name', label: 'Site' },
+              { key: 'worker_name', label: 'Worker', render: (w) => `${w.worker_name} (${w.worker_code})` },
+              { key: 'lunch', label: 'Lunch', type: 'bool' }, { key: 'dinner', label: 'Dinner', type: 'bool' },
+              { key: 'validated', label: 'Counted', render: (w) => (Number(w.validated) ? <Badge value="reported" tone="green" /> : <Badge value="report not submitted" tone="orange" />) }]} />
+        </Card>
       )}
     </div>
   );

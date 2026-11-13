@@ -9,8 +9,12 @@ const { wrap, bad, notFound, isDate, today } = require('../lib/http');
 const router = express.Router();
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
+// A person hired through Recruitment only becomes a visible worker once assigned to a
+// client / project / site (see POST /recruitment/candidates/:id/hire).
+const ASSIGNED_IF_RECRUITED = '(t.candidate_id IS NULL OR EXISTS (SELECT 1 FROM worker_assignments wa0 WHERE wa0.worker_id = t.id))';
+
 function workerScope(user) {
-  if (user.siteIds === null) return { sql: '1=1', params: [] };
+  if (user.siteIds === null) return { sql: ASSIGNED_IF_RECRUITED, params: [] };
   if (!user.siteIds.length) return { sql: '1=0', params: [] };
   return { sql: 't.id IN (SELECT wa.worker_id FROM worker_assignments wa WHERE wa.site_id IN (?))', params: [user.siteIds] };
 }

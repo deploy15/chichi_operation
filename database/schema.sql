@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS attendance (
   early_departure TINYINT(1) NOT NULL DEFAULT 0,
   normal_hours DECIMAL(5,2) NOT NULL DEFAULT 0,
   overtime_hours DECIMAL(5,2) NOT NULL DEFAULT 0,
+  -- Meals given to the worker that day. NULL = follow the assignment's meal entitlement.
+  lunch TINYINT(1) NULL,
+  dinner TINYINT(1) NULL,
   comments VARCHAR(500) NULL,
   validated TINYINT(1) NOT NULL DEFAULT 0,
   validated_by INT UNSIGNED NULL,

@@ -319,10 +319,18 @@ export function EntityForm({
         {visible.map((f) => (
           <Field
             key={f.name}
-            field={f}
+            // options may depend on other values, e.g. projects of the chosen client
+            field={typeof f.options === 'function' ? { ...f, options: f.options(values) } : f}
             value={values[f.name]}
             disabled={disabled || f.readOnly}
-            onChange={(v) => setValues((s) => ({ ...s, [f.name]: v }))}
+            onChange={(v) =>
+              setValues((s) => {
+                const next = { ...s, [f.name]: v };
+                // `resets`: fields cleared when this one changes (e.g. site when the project changes)
+                for (const r of f.resets || []) next[r] = null;
+                return next;
+              })
+            }
           />
         ))}
       </div>

@@ -6,6 +6,7 @@ const { crud } = require('../lib/crud');
 const { audit } = require('../lib/audit');
 const { requirePerm, siteFilter, kitchenFilter, assertSite, assertKitchen } = require('../lib/auth');
 const { wrap, bad, notFound, isDate, today } = require('../lib/http');
+const { MEAL_SQL } = require('../lib/meals');
 
 const router = express.Router();
 const MEALS = ['lunch', 'dinner'];
@@ -141,17 +142,22 @@ router.post('/stock-items/:id(\\d+)/movements', requirePerm('stock.manage'), wra
 }));
 
 // ---------- Meal requirements ----------
-// Rule from the requirements: Worker present + valid assignment + meal entitlement = meal required.
-// Only validated attendance is counted.
+// Rule: worker present + valid assignment + meal given that day = meal required.
+// The meal given is chosen on the daily attendance register (lunch, dinner or both); when it was
+// not chosen, the assignment's meal entitlement applies. Only validated attendance is counted.
 async function computeRequirements(date) {
   return db.query(
-    `SELECT a.site_id, me.meal_type, COUNT(*) AS qty
-       FROM attendance a
-       JOIN worker_assignments wa ON wa.id = a.assignment_id AND wa.status <> 'cancelled'
-            AND wa.start_date <= a.work_date AND (wa.end_date IS NULL OR wa.end_date >= a.work_date)
-       JOIN meal_entitlements me ON me.assignment_id = wa.id
-      WHERE a.work_date = ? AND a.status = 'present' AND a.validated = 1
-      GROUP BY a.site_id, me.meal_type`, [date]);
+    `SELECT site_id, meal_type, COUNT(*) AS qty FROM (
+       SELECT a.site_id, 'lunch' AS meal_type, ${MEAL_SQL('lunch')} AS given FROM attendance a
+         JOIN worker_assignments wa ON wa.id = a.assignment_id AND wa.status <> 'cancelled'
+              AND wa.start_date <= a.work_date AND (wa.end_date IS NULL OR wa.end_date >= a.work_date)
+        WHERE a.work_date = ? AND a.status = 'present' AND a.validated = 1
+       UNION ALL
+       SELECT a.site_id, 'dinner', ${MEAL_SQL('dinner')} FROM attendance a
+         JOIN worker_assignments wa ON wa.id = a.assignment_id AND wa.status <> 'cancelled'
+              AND wa.start_date <= a.work_date AND (wa.end_date IS NULL OR wa.end_date >= a.work_date)
+        WHERE a.work_date = ? AND a.status = 'present' AND a.validated = 1
+     ) x WHERE given = 1 GROUP BY site_id, meal_type`, [date, date]);
 }
 
 router.post('/catering/requirements/calculate', requirePerm('catering.manage'), wrap(async (req, res) => {
@@ -184,13 +190,24 @@ async function requirementsFor(user, date) {
   const pending = await db.query(
     `SELECT a.site_id, s.name AS site_name, COUNT(*) AS present_not_validated FROM attendance a JOIN sites s ON s.id = a.site_id
       WHERE a.work_date = ? AND a.status = 'present' AND a.validated = 0 AND ${s2.sql} GROUP BY a.site_id, s.name`, [date, ...s2.params]);
+  // Who gets which meal that day, as recorded on the daily attendance registers
+  const s3 = siteFilter(user, 'a.site_id');
+  const workers = await db.query(
+    `SELECT a.id, a.site_id, s.name AS site_name, p.name AS project_name, c.name AS client_name, w.worker_code,
+            CONCAT(w.first_name, ' ', w.last_name) AS worker_name, a.validated,
+            ${MEAL_SQL('lunch')} AS lunch, ${MEAL_SQL('dinner')} AS dinner
+       FROM attendance a JOIN workers w ON w.id = a.worker_id JOIN sites s ON s.id = a.site_id
+       JOIN projects p ON p.id = s.project_id JOIN clients c ON c.id = p.client_id
+      WHERE a.work_date = ? AND a.status = 'present' AND ${s3.sql}
+        AND (${MEAL_SQL('lunch')} = 1 OR ${MEAL_SQL('dinner')} = 1)
+      ORDER BY c.name, p.name, s.name, w.last_name, w.first_name`, [date, ...s3.params]);
   const byKitchen = {};
   for (const o of orders) {
     const key = o.kitchen_id || 0;
     byKitchen[key] = byKitchen[key] || { kitchen_id: o.kitchen_id, kitchen_name: o.kitchen_name || 'No kitchen assigned', lunch: 0, dinner: 0 };
     byKitchen[key][o.meal_type] += o.required_qty;
   }
-  return { date, orders, by_kitchen: Object.values(byKitchen), pending_validation: pending };
+  return { date, orders, by_kitchen: Object.values(byKitchen), pending_validation: pending, workers };
 }
 
 router.get('/catering/requirements', requirePerm('catering.view'), wrap(async (req, res) => {

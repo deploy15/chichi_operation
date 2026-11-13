@@ -45,6 +45,8 @@ const NEW_COLUMNS = [
   ['catering_expenses', 'purchase_request_id', 'INT UNSIGNED NULL AFTER approval_notes'],
   ['hse_corrective_actions', 'approved_by', 'INT UNSIGNED NULL AFTER completed_at'],
   ['hse_corrective_actions', 'approved_at', 'DATETIME NULL AFTER approved_by'],
+  ['attendance', 'lunch', 'TINYINT(1) NULL AFTER overtime_hours'],
+  ['attendance', 'dinner', 'TINYINT(1) NULL AFTER lunch'],
   ['settings', 'edit_permission', "VARCHAR(60) NOT NULL DEFAULT 'settings.manage'"],
 ];
 

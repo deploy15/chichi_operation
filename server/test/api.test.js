@@ -101,8 +101,12 @@ test('offline sync: duplicates ignored, conflicts detected, history kept', async
 test('daily workforce report, then catering: plan, produce, quality check, deliver, receive', async () => {
   const site1 = (await call('site1', 'GET', '/api/structure/sites')).body.find((s) => s.name === 'Site 1');
   const roster = (await call('site1', 'GET', `/api/attendance/roster?site_id=${site1.id}&date=${today}`)).body;
-  const ops = roster.map((r) => ({ op_id: crypto.randomUUID(), assignment_id: r.assignment_id, work_date: today, status: 'present', normal_hours: 8, base_version: r.version, late_arrival: !!r.late_arrival }));
+  // The first worker is given dinner only for the day; the others follow their usual meal entitlement
+  const ops = roster.map((r, i) => ({ op_id: crypto.randomUUID(), assignment_id: r.assignment_id, work_date: today, status: 'present', normal_hours: 8, base_version: r.version, late_arrival: !!r.late_arrival,
+    ...(i === 0 ? { lunch: 0, dinner: 1 } : {}) }));
   await call('site1', 'POST', '/api/sync/attendance', { operations: ops });
+  const after = (await call('site1', 'GET', `/api/attendance/roster?site_id=${site1.id}&date=${today}`)).body;
+  assert.deepEqual([after[0].lunch, after[0].dinner], [0, 1], 'meals chosen on the register are stored');
 
   let req = await call('chef', 'POST', '/api/catering/requirements/calculate', { date: today });
   assert.equal(req.body.orders.filter((o) => o.site_name === 'Site 1').length, 0, 'not submitted yet, so no meals');
@@ -117,7 +121,11 @@ test('daily workforce report, then catering: plan, produce, quality check, deliv
 
   req = await call('chef', 'POST', '/api/catering/requirements/calculate', { date: today });
   const lunch = req.body.orders.find((o) => o.site_name === 'Site 1' && o.meal_type === 'lunch');
-  assert.equal(lunch.required_qty, roster.filter((x) => x.meals.includes('lunch')).length);
+  assert.equal(lunch.required_qty, roster.slice(1).filter((x) => x.meals.includes('lunch')).length);
+  const dinner = req.body.orders.find((o) => o.site_name === 'Site 1' && o.meal_type === 'dinner');
+  assert.equal(dinner.required_qty, 1 + roster.slice(1).filter((x) => x.meals.includes('dinner')).length);
+  const mine = req.body.workers.find((w) => w.id === after[0].id);
+  assert.deepEqual([Number(mine.lunch), Number(mine.dinner)], [0, 1], 'worker listed on Meals needed with the meals from the register');
   const plans = await call('chef', 'POST', '/api/catering/plans/generate', { date: today });
   const plan = plans.body.plans.find((p) => p.kitchen_name === 'Central Kitchen' && p.meal_type === 'lunch');
   const kitchenId = plan.kitchen_id;
@@ -356,8 +364,24 @@ test('recruitment: register, verify documents, approve, hire; staffing requests 
   assert.equal((await call('daf', 'POST', `/api/recruitment/candidates/${c.body.id}/verify`, { id_document_ok: true, qualifications_ok: true })).status, 200, 'DAF validates recruitment documents');
   assert.equal((await call('daf', 'POST', `/api/recruitment/candidates/${c.body.id}/decision`, { decision: 'approved' })).status, 403);
   assert.equal((await call('recruitment', 'POST', `/api/recruitment/candidates/${c.body.id}/decision`, { decision: 'approved' })).status, 200);
-  const hired = await call('recruitment', 'POST', `/api/recruitment/candidates/${c.body.id}/hire`, { worker_code: 'W-HIRE1' });
+  const tree = (await call('recruitment', 'GET', '/api/structure/tree')).body;
+  const [client] = tree; const [project] = client.projects; const [site] = project.sites;
+  assert.equal((await call('recruitment', 'POST', `/api/recruitment/candidates/${c.body.id}/hire`, { worker_code: 'W-HIRE1' })).status, 400, 'a client / project / site is required');
+  const wrongProject = tree.flatMap((x) => x.projects).find((p) => p.id !== project.id);
+  if (wrongProject) {
+    assert.equal((await call('recruitment', 'POST', `/api/recruitment/candidates/${c.body.id}/hire`,
+      { worker_code: 'W-HIRE1', client_id: client.id, project_id: wrongProject.id, site_id: site.id, start_date: today })).status, 400, 'site must belong to the project');
+  }
+  const hired = await call('recruitment', 'POST', `/api/recruitment/candidates/${c.body.id}/hire`,
+    { worker_code: 'W-HIRE1', client_id: client.id, project_id: project.id, site_id: site.id, start_date: today, meals: ['lunch', 'dinner'] });
   assert.equal(hired.status, 201, JSON.stringify(hired.body));
+  const asg = (await call('recruitment', 'GET', `/api/workers/${hired.body.worker_id}/assignments`)).body;
+  assert.equal(asg.length, 1);
+  assert.equal(asg[0].site_id, site.id);
+  assert.deepEqual(asg[0].meals, ['dinner', 'lunch']);
+  assert.ok((await call('md', 'GET', '/api/workers?q=W-HIRE1')).body.some((w) => w.id === hired.body.worker_id), 'assigned recruit appears on the workers list');
+  assert.equal((await call('recruitment', 'POST', `/api/recruitment/candidates/${c.body.id}/hire`,
+    { client_id: client.id, project_id: project.id, site_id: site.id, start_date: today })).status, 400, 'cannot be hired twice');
 
   const sites = (await call('site1', 'GET', '/api/structure/sites')).body;
   let r = await call('site1', 'POST', '/api/staffing-requests', { site_id: sites[0].id, job_position: 'Labourer', quantity: 2, needed_from: today, forward: true });
